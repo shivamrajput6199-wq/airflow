@@ -24,6 +24,7 @@ import signal
 import sys
 from datetime import timedelta
 from unittest import mock
+from uuid import uuid4
 
 # Leave this it is used by the test worker.
 import celery.contrib.testing.tasks  # noqa: F401
@@ -66,6 +67,7 @@ except ImportError:
     _executor_name_tag_key = "name"
 
 if AIRFLOW_V_3_0_PLUS:
+    from airflow.executors import workloads
     from airflow.models.dag_version import DagVersion
 if AIRFLOW_V_3_2_PLUS:
     from airflow.executors.base_executor import ExecutorConf
@@ -366,8 +368,8 @@ class TestCeleryExecutor:
 
         not_adopted_tis = executor.try_adopt_task_instances(tis)
 
-        key_1 = TaskInstanceKey(dag.dag_id, task_1.task_id, None, 0)
-        key_2 = TaskInstanceKey(dag.dag_id, task_2.task_id, None, 0)
+        key_1 = ti1.id if executor.supports_task_instance_uuid else ti1.key
+        key_2 = ti2.id if executor.supports_task_instance_uuid else ti2.key
         assert executor.running == {key_1, key_2}
 
         assert executor.workloads == {key_1: AsyncResult("231"), key_2: AsyncResult("232")}
@@ -401,7 +403,7 @@ class TestCeleryExecutor:
         executor = celery_executor.CeleryExecutor()
         not_adopted_tis = executor.try_adopt_task_instances([ti_with_id, ti_without_id])
 
-        key_1 = TaskInstanceKey(dag.dag_id, task_1.task_id, None, 0)
+        key_1 = ti_with_id.id if executor.supports_task_instance_uuid else ti_with_id.key
         assert key_1 in executor.running
         assert executor.workloads == {key_1: AsyncResult("231")}
         assert not_adopted_tis == [ti_without_id]
@@ -439,8 +441,9 @@ class TestCeleryExecutor:
             executor.job_id = 1
             if hasattr(executor, "_register_task"):
                 executor._register_task(ti)
-            executor.running = {ti.key}
-            executor.workloads = {ti.key: AsyncResult("231")}
+            key = executor.get_task_key(ti) if executor.supports_task_instance_uuid else ti.key
+            executor.running = {key}
+            executor.workloads = {key: AsyncResult("231")}
             assert executor.has_task(ti)
             with pytest.warns(AirflowProviderDeprecationWarning, match="cleanup_stuck_queued_tasks"):
                 executor.cleanup_stuck_queued_tasks(tis=tis)
@@ -475,8 +478,9 @@ class TestCeleryExecutor:
             executor.job_id = 1
             if hasattr(executor, "_register_task"):
                 executor._register_task(ti)
-            executor.running = {ti.key}
-            executor.workloads = {ti.key: AsyncResult("231")}
+            key = executor.get_task_key(ti) if executor.supports_task_instance_uuid else ti.key
+            executor.running = {key}
+            executor.workloads = {key: AsyncResult("231")}
             assert executor.has_task(ti)
             for ti in tis:
                 executor.revoke_task(ti=ti)
@@ -1673,3 +1677,220 @@ class TestCreateCeleryAppTeamIsolation:
         team_conf = ExecutorConf(team_name="team_beta")
         celery_app = celery_executor_utils.create_celery_app(team_conf)
         assert "team_beta" in celery_app.main
+
+
+@pytest.fixture
+def identity_workload():
+    if not AIRFLOW_V_3_0_PLUS:
+        pytest.skip("Task workloads require Airflow 3+")
+    return workloads.ExecuteTask(
+        ti=workloads.TaskInstance(
+            id=uuid4(),
+            dag_version_id=uuid4(),
+            dag_id="dag",
+            task_id="task",
+            run_id="run",
+            try_number=1,
+            map_index=-1,
+            pool_slots=1,
+            priority_weight=1,
+            queue="default",
+            external_executor_id="celery-a",
+        ),
+        dag_rel_path="dag.py",
+        bundle_info=workloads.BundleInfo(name="bundle"),
+        token="",
+        log_path=None,
+    )
+
+
+@pytest.fixture
+def identity_executor(mocker):
+    app = Celery("identity-test", broker="memory://", backend="cache+memory://")
+    mocker.patch.object(celery_executor_utils, "create_celery_app", autospec=True, return_value=app)
+    executor = CeleryExecutor()
+    yield executor
+    app.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("state", ["SUCCESS", "FAILURE"])
+def test_task_identity_survives_celery_dispatch_and_completion(
+    identity_executor, identity_workload, legacy, state, monkeypatch, mocker
+):
+    executor, workload = identity_executor, identity_workload
+    native = hasattr(BaseExecutor, "get_task_key") and not legacy
+    if legacy and hasattr(BaseExecutor, "get_task_key"):
+        monkeypatch.setattr(CeleryExecutor, "supports_task_instance_uuid", False)
+    key = workload.ti.id if native else workload.ti.key
+    result = executor.celery_app.AsyncResult("celery-a")
+    sender = mocker.patch.object(
+        executor,
+        "_send_workloads_to_celery",
+        autospec=True,
+        side_effect=lambda items: [(item[0], None, result) for item in items],
+    )
+    executor.queue_workload(workload, session=None)
+    executor._process_workloads([workload])
+
+    assert executor.running == {key}
+    assert executor.workloads == {key: result}
+    assert not executor.queued_tasks
+    assert executor.get_event_buffer() == {key: (State.QUEUED, "celery-a")}
+    assert sender.call_args.args[0][0][0] == key
+
+    mocker.patch.object(
+        executor.bulk_state_fetcher, "get_many", autospec=True, return_value={"celery-a": (state, None)}
+    )
+    executor.sync()
+    assert not executor.running
+    assert not executor.workloads
+    assert executor.get_event_buffer() == {key: (State.SUCCESS if state == "SUCCESS" else State.FAILED, None)}
+
+
+@pytest.mark.skipif(not hasattr(BaseExecutor, "get_task_key"), reason="Requires UUID executor contract")
+def test_same_coordinate_tasks_keep_distinct_celery_results(identity_executor, identity_workload, mocker):
+    first = identity_workload
+    second = first.model_copy(
+        update={"ti": first.ti.model_copy(update={"id": uuid4(), "external_executor_id": "celery-b"})}
+    )
+    executor = identity_executor
+    results = {
+        "celery-a": executor.celery_app.AsyncResult("celery-a"),
+        "celery-b": executor.celery_app.AsyncResult("celery-b"),
+    }
+    mocker.patch.object(
+        executor,
+        "_send_workloads_to_celery",
+        autospec=True,
+        side_effect=lambda items: [
+            (item[0], None, results[item[1].ti.external_executor_id]) for item in items
+        ],
+    )
+    executor.queue_workload(first, session=None)
+    executor.queue_workload(second, session=None)
+    executor._process_workloads([first, second])
+    executor.get_event_buffer()
+    mocker.patch.object(
+        executor.bulk_state_fetcher,
+        "get_many",
+        autospec=True,
+        return_value={"celery-a": ("SUCCESS", None), "celery-b": ("PENDING", None)},
+    )
+    executor.sync()
+    assert executor.get_event_buffer() == {first.ti.id: (State.SUCCESS, None)}
+    assert executor.running == {second.ti.id}
+    assert executor.workloads == {second.ti.id: results["celery-b"]}
+
+
+@pytest.mark.parametrize("state", ["PENDING", "SUCCESS", "FAILURE"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_celery_adoption_keeps_original_task_identity(
+    identity_executor, identity_workload, state, legacy, monkeypatch, mocker
+):
+    executor, ti = identity_executor, identity_workload.ti
+    native = hasattr(BaseExecutor, "get_task_key") and not legacy
+    if legacy and hasattr(BaseExecutor, "get_task_key"):
+        monkeypatch.setattr(CeleryExecutor, "supports_task_instance_uuid", False)
+    key = ti.id if native else ti.key
+    result = executor.celery_app.AsyncResult("celery-a")
+    mocker.patch("celery.result.AsyncResult", autospec=True, return_value=result)
+    mocker.patch.object(
+        executor.bulk_state_fetcher, "get_many", autospec=True, return_value={"celery-a": (state, None)}
+    )
+    assert executor.try_adopt_task_instances([ti]) == []
+    ti.id = uuid4()
+    if state == "PENDING":
+        assert executor.running == {key}
+        assert executor.workloads == {key: result}
+    else:
+        assert not executor.running
+        assert not executor.workloads
+        assert executor.get_event_buffer() == {
+            key: (State.SUCCESS if state == "SUCCESS" else State.FAILED, None)
+        }
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_celery_revoke_removes_only_target_attempt(
+    identity_executor, identity_workload, legacy, monkeypatch, mocker
+):
+    executor, workload = identity_executor, identity_workload
+    native = hasattr(BaseExecutor, "get_task_key") and not legacy
+    if legacy and hasattr(BaseExecutor, "get_task_key"):
+        monkeypatch.setattr(CeleryExecutor, "supports_task_instance_uuid", False)
+    key = workload.ti.id if native else workload.ti.key
+    executor.queue_workload(workload, session=None)
+    executor.running.add(key)
+    executor.workloads[key] = executor.celery_app.AsyncResult("celery-a")
+    other_key = uuid4() if native else workload.ti.key.with_try_number(2)
+    executor.running.add(other_key)
+    executor.workloads[other_key] = executor.celery_app.AsyncResult("celery-b")
+    revoke = mocker.patch.object(executor.celery_app.control, "revoke", autospec=True)
+    executor.revoke_task(ti=workload.ti)
+    assert executor.running == {other_key}
+    assert set(executor.workloads) == {other_key}
+    assert not executor.queued_tasks
+    revoke.assert_called_once_with("celery-a")
+
+
+@pytest.mark.skipif(not hasattr(BaseExecutor, "get_task_key"), reason="Requires UUID executor contract")
+def test_uuid_publish_timeout_keeps_task_queued_for_retry(identity_executor, identity_workload, mocker):
+    executor, workload = identity_executor, identity_workload
+    key = workload.ti.id
+    executor.queue_workload(workload, session=None)
+    failure = celery_executor_utils.ExceptionWithTraceback(AirflowTaskTimeout(), "traceback")
+    mocker.patch.object(
+        executor, "_send_workloads_to_celery", autospec=True, return_value=[(key, None, failure)]
+    )
+    executor._process_workloads([workload])
+    assert executor.workload_publish_retries[key] == 1
+    assert executor.has_task(workload.ti)
+    assert executor.get_event_buffer() == {}
+
+
+@pytest.mark.skipif(not AIRFLOW_V_3_2_PLUS, reason="Callback workloads require Airflow 3.2+")
+def test_celery_task_and_callback_results_keep_distinct_states(identity_executor, identity_workload, mocker):
+    executor = identity_executor
+    callback = workloads.ExecuteCallback(
+        callback={
+            "id": str(identity_workload.ti.id),
+            "fetch_method": "import_path",
+            "data": {"path": "tests.callbacks.callback"},
+        },
+        dag_rel_path="dag.py",
+        bundle_info=workloads.BundleInfo(name="bundle"),
+        token="",
+        log_path=None,
+    )
+    task_key = identity_workload.ti.id if executor.supports_task_instance_uuid else identity_workload.ti.key
+    results = {
+        task_key: executor.celery_app.AsyncResult("celery-task"),
+        callback.key: executor.celery_app.AsyncResult("celery-callback"),
+    }
+    mocker.patch.object(
+        executor,
+        "_send_workloads_to_celery",
+        autospec=True,
+        side_effect=lambda items: [(item[0], None, results[item[0]]) for item in items],
+    )
+    for workload in (identity_workload, callback):
+        executor.queue_workload(workload, session=None)
+    executor._process_workloads([identity_workload, callback])
+    executor.get_event_buffer()
+    mocker.patch.object(
+        executor.bulk_state_fetcher,
+        "get_many",
+        autospec=True,
+        return_value={"celery-task": ("SUCCESS", None), "celery-callback": ("FAILURE", None)},
+    )
+    executor.sync()
+    events = executor.get_event_buffer()
+    assert events == {
+        task_key: (identity_workload.success_state, None),
+        callback.key: (callback.failure_state, None),
+    }
+    assert type(events[task_key][0]) is type(identity_workload.success_state)
+    assert type(events[callback.key][0]) is type(callback.failure_state)
+    assert not executor.running
+    assert not executor.workloads
