@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from cadwyn import VersionChange, schema
 
+from airflow.dag_processing.processor import DagFileParseRequest  # noqa: SDK002
 from airflow.sdk.api.datamodels._generated import TIRunContext
 from airflow.sdk.execution_time.comms import TaskState
 
@@ -52,3 +53,13 @@ class AddRetryReasonToTaskState(VersionChange):
     description = __doc__
 
     instructions_to_migrate_to_previous_version = (schema(TaskState).field("retry_reason").didnt_exist,)
+
+
+class AddKnownArtifactsToDagFileParseRequest(VersionChange):
+    """Add ``known_artifacts``, the recorded task-handler artifacts and their answers, to ``DagFileParseRequest``."""
+
+    description = __doc__
+
+    instructions_to_migrate_to_previous_version = (
+        schema(DagFileParseRequest).field("known_artifacts").didnt_exist,
+    )
