@@ -496,8 +496,10 @@ class SubprocessCoordinator(BaseCoordinator):
     wire-schema version via :meth:`_build_execute_task_command`. The rest of
     the socket lifecycle — listening, spawning the child, accepting
     connections, draining startup output, and tearing everything down on
-    failure — is handled here. A subclass that also reports its artifacts'
-    task handlers implements :meth:`_build_parse_task_handler_command`.
+    failure — is handled here.
+
+    A subclass that also reports its artifacts' task handlers implements
+    :meth:`_build_parse_task_handler_command`.
 
     :param task_startup_timeout: Maximum time the coordinator waits for the
         subprocess to connect to both servers, in seconds. The default is 10

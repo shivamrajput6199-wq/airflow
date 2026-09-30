@@ -129,12 +129,15 @@ def exec_lang_sdk_runtime(
     if not isinstance(msg, start_type):
         raise RuntimeError(f"Required first message to be a {start_type.__name__}, it was {msg}")
 
-    def report_schema_version(schema_version: str | None) -> None:
-        comms.send(LangSDKRuntimeSchemaVersion(schema_version=schema_version, import_timeout=import_timeout))
-
     try:
         # The policy is user code: it runs in this child, where a failure is only this file's import error.
         import_timeout = _get_import_timeout(msg.file)
+
+        def report_schema_version(schema_version: str | None) -> None:
+            comms.send(
+                LangSDKRuntimeSchemaVersion(schema_version=schema_version, import_timeout=import_timeout)
+            )
+
         launch(msg, report_schema_version)
     except Exception as e:
         comms.send(LangSDKRuntimeStartFailed(error=f"{type(e).__name__}: {e}"))
@@ -182,13 +185,14 @@ class BaseLangSDKRuntimeProcess(BaseDagFileProcessorProcess[_ResultT], Generic[_
     there is none.
 
     Subclasses provide the parse child's target and start request, build the import-error result,
-    and register their result type.
+    and register their result type in ``_request_handlers`` with :meth:`_handle_parsing_result`.
+    A result type that is not registered is rejected as an unhandled request.
     """
 
     client: Client | None = None  # type: ignore[assignment]
     """Answers the runtime's requests; without one, they are relayed to the parent process if there is one."""
 
-    decoder = TypeAdapter(
+    decoder: ClassVar[TypeAdapter[Any]] = TypeAdapter(
         Annotated[
             LangSDKRuntimeSchemaVersion | LangSDKRuntimeStartFailed | get_args(ToManager)[0],
             Field(discriminator="type"),

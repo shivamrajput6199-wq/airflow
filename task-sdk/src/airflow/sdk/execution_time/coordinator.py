@@ -305,13 +305,6 @@ class CoordinatorManager:
                 )
         return cls(coordinator_specs=coordinator_specs, queue_to_coordinator=queue_to_coordinator)
 
-    def _find_queue(self, key: str) -> BaseCoordinator:
-        with contextlib.suppress(KeyError):
-            return self._created_coordinators[key]
-        spec = self._coordinator_specs[key]
-        coordinator = self._created_coordinators[key] = import_string(spec.classpath)(**spec.kwargs)
-        return coordinator
-
     def for_queue(self, queue: str) -> BaseCoordinator:
         """
         Find the coordinator for *queue*.
@@ -323,14 +316,9 @@ class CoordinatorManager:
         except KeyError:
             log.debug("Queue not configured to a coordinator; defaulting to Python", queue=queue)
             return _build_python_coordinator()
-        try:
-            coordinator = self._find_queue(key)
-        except KeyError:
+        if key not in self._coordinator_specs:
             raise InvalidCoordinatorError(f"Queue {queue!r} configured to nonexistent coordinator")
-        except ImportError:
-            raise InvalidCoordinatorError(f"Cannot import coordinator {key!r}")
-        except TypeError:
-            raise InvalidCoordinatorError(f"Cannot instantiate coordinator {key!r}")
+        coordinator = self.get_coordinator(key)
         log.debug("Coordinator found for queue", coordinator=coordinator, queue=queue)
         return coordinator
 
@@ -341,14 +329,20 @@ class CoordinatorManager:
         :raises InvalidCoordinatorError: when *key* is not configured, or its coordinator cannot be
             imported or built.
         """
+        with contextlib.suppress(KeyError):
+            return self._created_coordinators[key]
         try:
-            return self._find_queue(key)
+            spec = self._coordinator_specs[key]
         except KeyError:
             raise InvalidCoordinatorError(f"No coordinator {key!r} in [sdk] coordinators")
+        try:
+            coordinator = import_string(spec.classpath)(**spec.kwargs)
         except ImportError:
             raise InvalidCoordinatorError(f"Cannot import coordinator {key!r}")
         except TypeError:
             raise InvalidCoordinatorError(f"Cannot instantiate coordinator {key!r}")
+        self._created_coordinators[key] = coordinator
+        return coordinator
 
     def extra_for_queue(self, queue: str) -> dict[str, Any] | None:
         """
