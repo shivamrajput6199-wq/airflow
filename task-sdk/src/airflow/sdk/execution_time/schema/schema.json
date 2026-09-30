@@ -4130,6 +4130,15 @@
           "title": "Task Id",
           "type": "string"
         },
+        "binding": {
+          "enum": [
+            "positional",
+            "named",
+            "named_or_whole"
+          ],
+          "title": "Binding",
+          "type": "string"
+        },
         "params": {
           "items": {
             "$ref": "#/$defs/TaskHandlerParam"
@@ -4140,6 +4149,7 @@
       },
       "required": [
         "task_id",
+        "binding",
         "params"
       ],
       "title": "TaskHandlerDeclaration",
@@ -4149,8 +4159,15 @@
       "description": "One parameter of a task handler.",
       "properties": {
         "name": {
-          "title": "Name",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
         },
         "value_schema": {
           "anyOf": [
@@ -4165,6 +4182,11 @@
         },
         "required": {
           "title": "Required",
+          "type": "boolean"
+        },
+        "exact_name": {
+          "default": false,
+          "title": "Exact Name",
           "type": "boolean"
         }
       },
