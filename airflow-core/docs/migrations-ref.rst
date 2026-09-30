@@ -39,7 +39,7 @@ Here's the list of all the Database Migrations that are executed via when you ru
 +-------------------------+------------------+-------------------+--------------------------------------------------------------+
 | Revision ID             | Revises ID       | Airflow Version   | Description                                                  |
 +=========================+==================+===================+==============================================================+
-| ``ffff41014d89`` (head) | ``e5a91c7f42b3`` | ``3.4.0``         | Add lang_sdk_task_handler_artifact and lang_sdk_task_handler |
+| ``f7ed13533d23`` (head) | ``e5a91c7f42b3`` | ``3.4.0``         | Add lang_sdk_task_handler_artifact and lang_sdk_task_handler |
 |                         |                  |                   | tables.                                                      |
 +-------------------------+------------------+-------------------+--------------------------------------------------------------+
 | ``e5a91c7f42b3``        | ``ca8499dc1004`` | ``3.4.0``         | Add language column to dag_code.                             |
