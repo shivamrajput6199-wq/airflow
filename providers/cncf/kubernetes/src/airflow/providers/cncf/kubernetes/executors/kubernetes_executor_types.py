@@ -20,6 +20,13 @@ import json
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
 from uuid import UUID
 
+from airflow.executors.base_executor import BaseExecutor
+
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid
+else:
+    TaskInstanceUuid = UUID
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -49,7 +56,7 @@ class FailureDetails(TypedDict, total=False):
 class KubernetesResults(NamedTuple):
     """Results from Kubernetes task execution."""
 
-    key: UUID | TaskInstanceKey
+    key: TaskInstanceUuid | TaskInstanceKey
     state: TaskInstanceState | str | None
     pod_name: str
     namespace: str
@@ -75,7 +82,7 @@ CommandType = "Sequence[str]"
 class KubernetesJob(NamedTuple):
     """Job definition for Kubernetes execution."""
 
-    key: UUID | TaskInstanceKey
+    key: TaskInstanceUuid | TaskInstanceKey
     command: Sequence[str]
     kube_executor_config: Any
     pod_template_file: str | None

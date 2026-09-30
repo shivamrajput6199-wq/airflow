@@ -44,6 +44,9 @@ from tests_common.test_utils.version_compat import (
     AIRFLOW_V_3_4_PLUS,
 )
 
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid
+
 airflow_version = VersionInfo(*map(int, airflow_version_str.split(".")[:3]))
 
 DEFAULT_QUEUE_URL = "queue-url"
@@ -161,7 +164,9 @@ class TestAwsLambdaExecutor:
         else:
             task_queue = mock_executor.queued_tasks
 
-        executor_key = workload.ti.id if mock_executor.supports_task_instance_uuid else workload.ti.key
+        executor_key = (
+            TaskInstanceUuid(workload.ti.id) if mock_executor.supports_task_instance_uuid else workload.ti.key
+        )
         if mock_executor.supports_task_instance_uuid:
             ser_airflow_key = str(workload.ti.id)
         mock_executor.queue_workload(workload, mock.Mock())
@@ -1051,11 +1056,15 @@ class TestAwsLambdaExecutor:
         assert ser_airflow_key_1 in mock_executor.running_workloads
 
         assert mock_executor.running_workloads[ser_airflow_key_1] == (
-            orphaned_tasks[0].id if mock_executor.supports_task_instance_uuid else airflow_key_1
+            TaskInstanceUuid(orphaned_tasks[0].id)
+            if mock_executor.supports_task_instance_uuid
+            else airflow_key_1
         )
         assert ser_airflow_key_2 in mock_executor.running_workloads
         assert mock_executor.running_workloads[ser_airflow_key_2] == (
-            orphaned_tasks[1].id if mock_executor.supports_task_instance_uuid else airflow_key_2
+            TaskInstanceUuid(orphaned_tasks[1].id)
+            if mock_executor.supports_task_instance_uuid
+            else airflow_key_2
         )
 
         # The remaining one task is unable to be adopted.
@@ -1287,7 +1296,7 @@ class TestTaskIdentity:
         if not native:
             monkeypatch.setattr(AwsLambdaExecutor, "supports_task_instance_uuid", False)
             task_identity_workloads[1].ti.try_number = 2
-        keys = [w.ti.id if native else w.ti.key for w in task_identity_workloads]
+        keys = [TaskInstanceUuid(w.ti.id) if native else w.ti.key for w in task_identity_workloads]
         for workload in task_identity_workloads:
             mock_executor.queue_workload(workload, session=None)
         mock_executor._process_workloads(task_identity_workloads)
@@ -1336,7 +1345,7 @@ class TestTaskIdentity:
             queue="default",
             executor_config={},
         )
-        original_id = ti.id
+        original_id = TaskInstanceUuid(ti.id)
         transport_key = {
             "uuid": str(ti.id),
             "legacy": json.dumps(ti.key._asdict()),

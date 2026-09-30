@@ -56,6 +56,9 @@ if AIRFLOW_V_3_4_PLUS:
 
     _SUPPORTED_WORKLOAD_TYPES = frozenset({WorkloadType.EXECUTE_TASK, WorkloadType.EXECUTE_CALLBACK})
 
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
@@ -580,7 +583,7 @@ class AwsLambdaExecutor(BaseExecutor):
                 for ti, ser_workload_key in serialized_workload_keys:
                     if self.supports_task_instance_uuid:
                         try:
-                            workload_key = UUID(ser_workload_key)
+                            task_id = UUID(ser_workload_key)
                         except ValueError:
                             try:
                                 legacy_key = TaskInstanceKey.from_dict(json.loads(ser_workload_key))
@@ -595,11 +598,13 @@ class AwsLambdaExecutor(BaseExecutor):
                                 )
                                 continue
                             workload_key = self.get_task_key(ti)
-                        if workload_key != ti.id:
-                            self.log.warning(
-                                "Cannot adopt task with mismatched identity %s", ser_workload_key
-                            )
-                            continue
+                        else:
+                            if task_id != ti.id:
+                                self.log.warning(
+                                    "Cannot adopt task with mismatched identity %s", ser_workload_key
+                                )
+                                continue
+                            workload_key = TaskInstanceUuid(task_id)
                     else:
                         try:
                             data = json.loads(ser_workload_key)

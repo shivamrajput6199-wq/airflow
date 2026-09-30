@@ -28,7 +28,7 @@ from uuid import uuid4
 import pytest
 import yaml
 from aiohttp import ClientConnectionError
-from kubernetes.client import CoreV1Api, models as k8s
+from kubernetes.client import ApiClient, CoreV1Api, models as k8s
 from kubernetes.client.rest import ApiException
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session
@@ -660,13 +660,14 @@ class TestAirflowKubernetesScheduler:
                 KubernetesExecutor()
 
 
+@pytest.mark.usefixtures("coordinate_key_contract")
 class TestKubernetesExecutor:
     """
     Tests if an ApiException from the Kube Client will cause the task to
     be rescheduled.
     """
 
-    @pytest.fixture(autouse=True)
+    @pytest.fixture
     def coordinate_key_contract(self, monkeypatch):
         monkeypatch.setattr(KubernetesExecutor, "supports_task_instance_uuid", False)
 
@@ -1723,13 +1724,11 @@ class TestKubernetesExecutor:
     @pytest.mark.parametrize("native_uuid", [False, True])
     def test_process_workloads(self, mock_execute_async, monkeypatch, native_uuid):
         """Test that _process_workloads dequeues an ExecuteTask and hands it to execute_async."""
-        from airflow.executors.workloads import BundleInfo, ExecuteTask, TaskInstance
-
         executor = self.kubernetes_executor
         native_uuid = native_uuid and hasattr(executor, "get_task_key")
         monkeypatch.setattr(KubernetesExecutor, "supports_task_instance_uuid", native_uuid)
         workload = ExecuteTask(
-            ti=TaskInstance(
+            ti=WorkloadTaskInstance(
                 id=uuid4(),
                 dag_version_id=uuid4(),
                 dag_id="dag",
@@ -1746,7 +1745,7 @@ class TestKubernetesExecutor:
             token="",
             log_path=None,
         )
-        key = workload.ti.id if native_uuid else workload.ti.key
+        key = executor.get_task_key(workload.ti) if native_uuid else workload.ti.key
 
         if AIRFLOW_V_3_4_PLUS:
             from airflow.executors.workloads.base import WorkloadType
@@ -1754,7 +1753,10 @@ class TestKubernetesExecutor:
             task_queue = executor.executor_queues[WorkloadType.EXECUTE_TASK]
         else:
             task_queue = executor.queued_tasks
-        executor.queue_workload(workload, session=None)
+        if AIRFLOW_V_3_1_PLUS:
+            executor.queue_workload(workload, session=None)
+        else:
+            executor.queue_command(workload.ti, [workload], workload.ti.priority_weight, workload.ti.queue)
 
         executor._process_workloads([workload])
 
@@ -1765,12 +1767,7 @@ class TestKubernetesExecutor:
         )
         executor.success(key)
         assert key not in executor.running
-        if hasattr(executor, "get_event_buffer_with_task_ids"):
-            assert executor.get_event_buffer_with_task_ids() == {
-                workload.ti.id: (TaskInstanceState.SUCCESS, None)
-            }
-        else:
-            assert executor.get_event_buffer() == {key: (TaskInstanceState.SUCCESS, None)}
+        assert executor.get_event_buffer() == {key: (TaskInstanceState.SUCCESS, None)}
 
     @mock.patch("airflow.providers.cncf.kubernetes.executors.kubernetes_executor_utils.KubernetesJobWatcher")
     @mock.patch("airflow.providers.cncf.kubernetes.kube_client.get_kube_client")
@@ -4058,6 +4055,10 @@ def uuid_workload():
     )
 
 
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid
+
+
 @pytest.mark.skipif(not hasattr(BaseExecutor, "get_task_key"), reason="Requires executor UUID support")
 class TestKubernetesExecutorUuid:
     def test_submission_keeps_distinct_uuids_with_identical_coordinates(self, uuid_workload, mocker):
@@ -4072,17 +4073,21 @@ class TestKubernetesExecutorUuid:
         executor._process_workloads([uuid_workload, second])
 
         jobs = [executor.task_queue.get_nowait(), executor.task_queue.get_nowait()]
-        assert [job.key for job in jobs] == [uuid_workload.ti.id, second.ti.id]
-        assert executor.running == {uuid_workload.ti.id, second.ti.id}
-        assert executor.get_event_buffer_with_task_ids() == {
-            uuid_workload.ti.id: (State.QUEUED, "5"),
-            second.ti.id: (State.QUEUED, "5"),
+        assert [job.key for job in jobs] == [
+            TaskInstanceUuid(uuid_workload.ti.id),
+            TaskInstanceUuid(second.ti.id),
+        ]
+        assert executor.running == {TaskInstanceUuid(uuid_workload.ti.id), TaskInstanceUuid(second.ti.id)}
+        assert executor.get_event_buffer() == {
+            TaskInstanceUuid(uuid_workload.ti.id): (State.QUEUED, "5"),
+            TaskInstanceUuid(second.ti.id): (State.QUEUED, "5"),
         }
 
     @pytest.mark.parametrize("state", [State.FAILED, None, ADOPTED])
     def test_watcher_result_preserves_uuid_annotation(self, uuid_workload, state):
         scheduler = AirflowKubernetesScheduler.__new__(AirflowKubernetesScheduler)
         scheduler.result_queue = Queue()
+        scheduler.supports_task_instance_uuid = True
         annotations = {
             "dag_id": "uuid_dag",
             "task_id": "task",
@@ -4094,7 +4099,7 @@ class TestKubernetesExecutorUuid:
         scheduler.process_watcher_task(KubernetesWatch("pod", "ns", state, annotations, "1", None))
 
         result = scheduler.result_queue.get_nowait()
-        assert result.key == uuid_workload.ti.id
+        assert result.key == TaskInstanceUuid(uuid_workload.ti.id)
         assert result.state == state
 
     @pytest.mark.parametrize("annotated", [False, True])
@@ -4118,11 +4123,17 @@ class TestKubernetesExecutorUuid:
             ),
         )
         kube_client = mocker.create_autospec(CoreV1Api)
+        kube_client.read_namespaced_pod.return_value = pod
         candidates = {uuid_workload.ti.key: uuid_workload.ti}
 
-        executor.adopt_launched_task(kube_client, pod, candidates)
+        metadata = k8s.V1Pod(metadata=pod.metadata)
+        executor.adopt_launched_task(kube_client, metadata, candidates)
 
-        assert executor.running == {uuid_workload.ti.id}
+        if annotated:
+            kube_client.read_namespaced_pod.assert_not_called()
+        else:
+            kube_client.read_namespaced_pod.assert_called_once_with(name="old-pod", namespace="ns")
+        assert executor.running == {TaskInstanceUuid(uuid_workload.ti.id)}
         assert candidates == {}
         patch = kube_client.patch_namespaced_pod.call_args.kwargs["body"]
         assert patch["metadata"]["annotations"]["task_instance_id"] == str(uuid_workload.ti.id)
@@ -4147,6 +4158,7 @@ class TestKubernetesExecutorUuid:
         successor = uuid_workload.ti.model_copy(update={"id": uuid4()})
         candidates = {successor.key: successor}
         kube_client = mocker.create_autospec(CoreV1Api)
+        kube_client.read_namespaced_pod.return_value = pod
 
         executor.adopt_launched_task(kube_client, pod, candidates)
 
@@ -4169,7 +4181,9 @@ class TestKubernetesExecutorUuid:
             return_value=base,
         )
 
-        pod = scheduler._build_pod_request(KubernetesJob(uuid_workload.ti.id, [uuid_workload], None, None))
+        pod = scheduler._build_pod_request(
+            KubernetesJob(TaskInstanceUuid(uuid_workload.ti.id), [uuid_workload], None, None)
+        )
 
         assert pod.metadata.annotations["task_instance_id"] == str(uuid_workload.ti.id)
         assert pod.metadata.annotations["dag_id"] == "uuid_dag"
@@ -4178,11 +4192,13 @@ class TestKubernetesExecutorUuid:
     def test_stale_pod_result_does_not_remove_successor(self, uuid_workload, mocker):
         executor = KubernetesExecutor()
         executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
-        successor_id = uuid4()
+        successor_id = TaskInstanceUuid(uuid4())
         executor.running.add(successor_id)
 
         executor._change_state(
-            KubernetesResults(uuid_workload.ti.id, State.FAILED, "old-pod", "ns", "1", None),
+            KubernetesResults(
+                TaskInstanceUuid(uuid_workload.ti.id), State.FAILED, "old-pod", "ns", "1", None
+            ),
             session=mocker.create_autospec(Session, instance=True),
         )
 
@@ -4194,7 +4210,7 @@ class TestKubernetesExecutorUuid:
         session = mocker.create_autospec(Session, instance=True)
         session.scalar.return_value = State.RESTARTING
 
-        state = executor._get_task_instance_state(uuid_workload.ti.id, session=session)
+        state = executor._get_task_instance_state(TaskInstanceUuid(uuid_workload.ti.id), session=session)
 
         statement = session.scalar.call_args.args[0]
         assert statement.compile().params == {"id_1": uuid_workload.ti.id}
@@ -4203,8 +4219,8 @@ class TestKubernetesExecutorUuid:
     def test_revoke_selects_uuid_among_pods_with_reused_coordinates(self, uuid_workload, mocker):
         executor = KubernetesExecutor()
         executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
-        successor_id = uuid4()
-        executor.running.update([uuid_workload.ti.id, successor_id])
+        successor_id = TaskInstanceUuid(uuid4())
+        executor.running.update([TaskInstanceUuid(uuid_workload.ti.id), successor_id])
         pods = [
             k8s.V1Pod(
                 metadata=k8s.V1ObjectMeta(
@@ -4213,7 +4229,7 @@ class TestKubernetesExecutorUuid:
                     annotations={"task_instance_id": str(task_id)},
                 )
             )
-            for name, task_id in [("old", uuid_workload.ti.id), ("new", successor_id)]
+            for name, task_id in [("old", TaskInstanceUuid(uuid_workload.ti.id)), ("new", successor_id)]
         ]
         mocker.patch.object(executor, "_list_pods", autospec=True, return_value=pods)
 
@@ -4232,6 +4248,7 @@ class TestKubernetesExecutorUuid:
         pod = k8s.V1Pod(metadata=k8s.V1ObjectMeta(name="old", namespace="ns", annotations=annotations))
         candidates = {uuid_workload.ti.key: uuid_workload.ti}
         kube_client = mocker.create_autospec(CoreV1Api)
+        kube_client.read_namespaced_pod.return_value = pod
 
         executor.adopt_launched_task(kube_client, pod, candidates)
 
@@ -4241,7 +4258,7 @@ class TestKubernetesExecutorUuid:
 
     def test_watcher_recovers_pre_upgrade_uuid_from_pod_command(self, uuid_workload, mocker):
         executor = KubernetesExecutor()
-        watcher = KubernetesJobWatcher("ns", Queue(), "0", "5", executor.kube_config)
+        watcher = KubernetesJobWatcher("ns", Queue(), "0", "5", executor.kube_config, True)
         pod = k8s.V1Pod(
             metadata=k8s.V1ObjectMeta(
                 name="old",
@@ -4262,16 +4279,17 @@ class TestKubernetesExecutorUuid:
         )
         scheduler = AirflowKubernetesScheduler.__new__(AirflowKubernetesScheduler)
         scheduler.result_queue = Queue()
+        scheduler.supports_task_instance_uuid = True
 
         watcher._run(mocker.create_autospec(CoreV1Api), "0", "5", executor.kube_config)
         scheduler.process_watcher_task(watcher.watcher_queue.get_nowait())
 
-        assert scheduler.result_queue.get_nowait().key == uuid_workload.ti.id
+        assert scheduler.result_queue.get_nowait().key == TaskInstanceUuid(uuid_workload.ti.id)
 
-    def test_watcher_ignores_uuid_annotation_on_older_core(self, uuid_workload, monkeypatch):
-        monkeypatch.delattr(BaseExecutor, "get_task_key")
+    def test_watcher_ignores_uuid_annotation_in_coordinate_mode(self, uuid_workload):
         scheduler = AirflowKubernetesScheduler.__new__(AirflowKubernetesScheduler)
         scheduler.result_queue = Queue()
+        scheduler.supports_task_instance_uuid = False
         annotations = {
             "dag_id": "uuid_dag",
             "task_id": "task",
@@ -4287,6 +4305,7 @@ class TestKubernetesExecutorUuid:
     def test_watcher_discards_malformed_uuid_annotation(self):
         scheduler = AirflowKubernetesScheduler.__new__(AirflowKubernetesScheduler)
         scheduler.result_queue = Queue()
+        scheduler.supports_task_instance_uuid = True
         annotations = {
             "dag_id": "uuid_dag",
             "task_id": "task",
@@ -4303,13 +4322,13 @@ class TestKubernetesExecutorUuid:
     def test_current_uuid_result_leaves_other_attempt_running(self, uuid_workload, mocker, pod_state):
         executor = KubernetesExecutor()
         executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
-        successor_id = uuid4()
-        executor.running.update([uuid_workload.ti.id, successor_id])
+        successor_id = TaskInstanceUuid(uuid4())
+        executor.running.update([TaskInstanceUuid(uuid_workload.ti.id), successor_id])
         session = mocker.create_autospec(Session, instance=True)
         session.scalar.return_value = State.SUCCESS
 
         executor._change_state(
-            KubernetesResults(uuid_workload.ti.id, pod_state, "pod", "ns", "1", None),
+            KubernetesResults(TaskInstanceUuid(uuid_workload.ti.id), pod_state, "pod", "ns", "1", None),
             session=session,
         )
 
@@ -4318,15 +4337,15 @@ class TestKubernetesExecutorUuid:
             assert executor.event_buffer == {}
         else:
             expected_state = State.SUCCESS if pod_state is None else pod_state
-            assert executor.event_buffer == {uuid_workload.ti.id: (expected_state, None)}
-        assert (uuid_workload.ti.id in executor.running) == (pod_state == State.RUNNING)
+            assert executor.event_buffer == {TaskInstanceUuid(uuid_workload.ti.id): (expected_state, None)}
+        assert (TaskInstanceUuid(uuid_workload.ti.id) in executor.running) == (pod_state == State.RUNNING)
         if pod_state is not None:
             session.scalar.assert_not_called()
 
     def test_unidentified_coordinate_result_never_queries_current_task(self, uuid_workload, mocker):
         executor = KubernetesExecutor()
         executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
-        executor.running.add(uuid_workload.ti.id)
+        executor.running.add(TaskInstanceUuid(uuid_workload.ti.id))
         session = mocker.create_autospec(Session, instance=True)
 
         executor._change_state(
@@ -4334,6 +4353,205 @@ class TestKubernetesExecutorUuid:
             session=session,
         )
 
-        assert executor.running == {uuid_workload.ti.id}
+        assert executor.running == {TaskInstanceUuid(uuid_workload.ti.id)}
         assert executor.event_buffer == {}
         session.scalar.assert_not_called()
+
+    @pytest.mark.parametrize("status", [404, 403, 500])
+    @pytest.mark.parametrize("operation", ["adopt", "revoke"])
+    def test_metadata_pod_get_handles_missing_pod_and_propagates_other_errors(
+        self, uuid_workload, mocker, status, operation
+    ):
+        executor = KubernetesExecutor()
+        executor.scheduler_job_id = "5"
+        executor.kube_client = mocker.create_autospec(CoreV1Api, instance=True)
+        executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
+        executor.kube_client.read_namespaced_pod.side_effect = ApiException(status=status)
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name="old",
+                namespace="ns",
+                annotations={"dag_id": "uuid_dag", "task_id": "task", "run_id": "run", "try_number": "1"},
+            )
+        )
+        candidates = {uuid_workload.ti.key: uuid_workload.ti}
+        mocker.patch.object(executor, "_list_pods", autospec=True, return_value=[pod])
+
+        def act():
+            if operation == "adopt":
+                executor.adopt_launched_task(executor.kube_client, pod, candidates)
+            else:
+                executor.revoke_task(ti=uuid_workload.ti)
+
+        if status == 404:
+            act()
+        else:
+            with pytest.raises(ApiException) as error:
+                act()
+            assert error.value.status == status
+        assert candidates == {uuid_workload.ti.key: uuid_workload.ti}
+        executor.kube_client.patch_namespaced_pod.assert_not_called()
+        executor.kube_scheduler.delete_pod.assert_not_called()
+
+    def test_adoption_filters_coordinates_before_reading_full_pod(self, uuid_workload, mocker):
+        executor = KubernetesExecutor()
+        executor.scheduler_job_id = "5"
+        client = mocker.create_autospec(CoreV1Api, instance=True)
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name="unrelated",
+                namespace="ns",
+                annotations={"dag_id": "other", "task_id": "task", "run_id": "run", "try_number": "1"},
+            )
+        )
+
+        executor.adopt_launched_task(client, pod, {uuid_workload.ti.key: uuid_workload.ti})
+
+        client.read_namespaced_pod.assert_not_called()
+        client.patch_namespaced_pod.assert_not_called()
+
+    @pytest.mark.parametrize("identity", ["invalid", "mismatch"])
+    def test_revoke_rejects_bad_annotation_without_reading_pod(self, uuid_workload, mocker, identity):
+        executor = KubernetesExecutor()
+        executor.kube_client = mocker.create_autospec(CoreV1Api, instance=True)
+        executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name="old",
+                namespace="ns",
+                annotations={"task_instance_id": str(uuid4()) if identity == "mismatch" else identity},
+            )
+        )
+        mocker.patch.object(executor, "_list_pods", autospec=True, return_value=[pod])
+
+        executor.revoke_task(ti=uuid_workload.ti)
+
+        executor.kube_client.read_namespaced_pod.assert_not_called()
+        executor.kube_scheduler.delete_pod.assert_not_called()
+
+    def test_revoke_recovers_workload_identity_and_preserves_get_options(self, uuid_workload, mocker):
+        executor = KubernetesExecutor()
+        executor.kube_config.kube_client_request_args = {"_request_timeout": (3, 9)}
+        executor.kube_client = mocker.create_autospec(CoreV1Api, instance=True)
+        executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
+        metadata = k8s.V1ObjectMeta(name="old", namespace="ns", annotations={})
+        executor.kube_client.read_namespaced_pod.return_value = k8s.V1Pod(
+            metadata=metadata,
+            spec=k8s.V1PodSpec(
+                containers=[
+                    k8s.V1Container(name="base", args=pod_generator.workload_to_command_args(uuid_workload))
+                ]
+            ),
+        )
+        mocker.patch.object(
+            executor, "_list_pods", autospec=True, return_value=[k8s.V1Pod(metadata=metadata)]
+        )
+
+        executor.revoke_task(ti=uuid_workload.ti)
+
+        executor.kube_client.read_namespaced_pod.assert_called_once_with(
+            name="old", namespace="ns", _request_timeout=(3, 9)
+        )
+        executor.kube_scheduler.patch_pod_revoked.assert_called_once_with(pod_name="old", namespace="ns")
+        executor.kube_scheduler.delete_pod.assert_called_once_with(pod_name="old", namespace="ns")
+
+    def test_list_pods_preserves_configured_request_options(self, mocker):
+        executor = KubernetesExecutor()
+        executor.kube_client = mocker.create_autospec(CoreV1Api, instance=True)
+        executor.kube_client.api_client = mocker.create_autospec(ApiClient, instance=True)
+        executor.kube_config.kube_client_request_args = {"_request_timeout": (3, 9)}
+        dynamic = mocker.patch(
+            "airflow.providers.cncf.kubernetes.executors.kubernetes_executor.DynamicClient", autospec=True
+        ).return_value
+        dynamic.get.return_value.items = []
+
+        assert executor._list_pods({"label_selector": "airflow-worker=5"}) == []
+
+        assert dynamic.get.call_args.kwargs["_request_timeout"] == (3, 9)
+        assert dynamic.get.call_args.kwargs["label_selector"] == "airflow-worker=5"
+        assert "PartialObjectMetadataList" in dynamic.get.call_args.kwargs["header_params"]["Accept"]
+
+    def test_retrying_adoption_does_not_flush_already_running_uuid(self, uuid_workload, mocker):
+        executor = KubernetesExecutor()
+        ti = uuid_workload.ti.model_copy(update={"queued_by_job_id": 4})
+        executor.running.add(executor.get_task_key(ti))
+        mocker.patch.object(executor, "_list_pods", autospec=True, return_value=[])
+        mocker.patch.object(executor, "_adopt_completed_pods", autospec=True)
+
+        assert executor.try_adopt_task_instances([ti]) == []
+
+    @pytest.mark.parametrize("annotated", [False, True])
+    def test_completed_pod_adoption_cleans_pod_without_task_event(self, uuid_workload, mocker, annotated):
+        executor = KubernetesExecutor()
+        executor.scheduler_job_id = "5"
+        executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
+        executor.kube_config.delete_worker_pods = True
+        client = mocker.create_autospec(CoreV1Api, instance=True)
+        annotations = {"dag_id": "uuid_dag", "task_id": "task", "run_id": "run", "try_number": "1"}
+        if annotated:
+            annotations["task_instance_id"] = str(uuid_workload.ti.id)
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name="done", namespace="ns", annotations=annotations, resource_version="1"
+            )
+        )
+        mocker.patch.object(executor, "_alive_other_scheduler_job_ids", autospec=True, return_value=set())
+        mocker.patch.object(executor, "_list_pods", autospec=True, return_value=[pod])
+        session = mocker.create_autospec(Session, instance=True)
+
+        executor._adopt_completed_pods(client)
+        result = executor.completed[("ns", "done")]
+        executor._change_state(result, session=session)
+
+        assert result.key == (executor.get_task_key(uuid_workload.ti) if annotated else uuid_workload.ti.key)
+        executor.kube_scheduler.delete_pod.assert_called_once_with(pod_name="done", namespace="ns")
+        assert executor.event_buffer == {}
+        session.scalar.assert_not_called()
+        client.read_namespaced_pod.assert_not_called()
+
+    def test_cleanup_stuck_queued_tasks_fails_uuid_and_preserves_other_attempt(self, uuid_workload, mocker):
+        executor = KubernetesExecutor()
+        executor.kube_scheduler = mocker.create_autospec(AirflowKubernetesScheduler, instance=True)
+        key = executor.get_task_key(uuid_workload.ti)
+        successor = TaskInstanceUuid(uuid4())
+        executor.running.update([key, successor])
+        mocker.patch.object(executor, "_list_pods", autospec=True, return_value=[])
+
+        with pytest.warns(DeprecationWarning, match="cleanup_stuck_queued_tasks"):
+            executor.cleanup_stuck_queued_tasks([uuid_workload.ti])
+
+        assert executor.running == {successor}
+        assert executor.event_buffer == {key: (State.FAILED, None)}
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_executor_start_passes_selected_identity_mode_to_scheduler(self, mocker, monkeypatch, native):
+        monkeypatch.setattr(KubernetesExecutor, "supports_task_instance_uuid", native)
+        executor = KubernetesExecutor()
+        executor.job_id = 5
+        mocker.patch("multiprocessing.Manager", autospec=True)
+        mocker.patch("airflow.providers.cncf.kubernetes.kube_client.get_kube_client", autospec=True)
+        scheduler = mocker.patch(
+            "airflow.providers.cncf.kubernetes.executors.kubernetes_executor_utils.AirflowKubernetesScheduler",
+            autospec=True,
+        )
+
+        executor.start()
+
+        assert scheduler.call_args.kwargs["supports_task_instance_uuid"] is native
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_scheduler_passes_selected_identity_mode_to_watcher(self, mocker, native):
+        scheduler = AirflowKubernetesScheduler.__new__(AirflowKubernetesScheduler)
+        scheduler.supports_task_instance_uuid = native
+        scheduler.scheduler_job_id = "5"
+        scheduler.kube_config = KubernetesExecutor().kube_config
+        scheduler.watcher_queue = Queue()
+        watcher = mocker.patch(
+            "airflow.providers.cncf.kubernetes.executors.kubernetes_executor_utils.KubernetesJobWatcher",
+            autospec=True,
+        )
+
+        scheduler._make_kube_watcher("ns")
+
+        assert watcher.call_args.kwargs["supports_task_instance_uuid"] is native
+        watcher.return_value.start.assert_called_once_with()

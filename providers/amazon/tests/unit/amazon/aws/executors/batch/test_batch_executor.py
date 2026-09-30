@@ -57,6 +57,10 @@ from tests_common.test_utils.version_compat import (
     AIRFLOW_V_3_4_PLUS,
 )
 
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid
+    from airflow.models.taskinstancehistory import TaskInstanceHistory
+
 airflow_version = VersionInfo(*map(int, airflow_version_str.split(".")[:3]))
 ARN1 = "arn1"
 
@@ -247,7 +251,9 @@ class TestAwsBatchExecutor:
         else:
             task_queue = mock_executor.queued_tasks
 
-        executor_key = workload.ti.id if mock_executor.supports_task_instance_uuid else workload.ti.key
+        executor_key = (
+            TaskInstanceUuid(workload.ti.id) if mock_executor.supports_task_instance_uuid else workload.ti.key
+        )
         mock_executor.queue_workload(workload, mock.Mock())
 
         mock_executor.batch.submit_job.return_value = {"jobId": ARN1, "jobName": "some-job-name"}
@@ -1390,7 +1396,7 @@ class TestTaskIdentity:
         if not native:
             monkeypatch.setattr(AwsBatchExecutor, "supports_task_instance_uuid", False)
             task_identity_workloads[1].ti.try_number = 2
-        keys = [w.ti.id if native else w.ti.key for w in task_identity_workloads]
+        keys = [TaskInstanceUuid(w.ti.id) if native else w.ti.key for w in task_identity_workloads]
         for workload in task_identity_workloads:
             mock_executor.queue_workload(workload, session=None)
         mock_executor._process_workloads(task_identity_workloads)
@@ -1430,7 +1436,7 @@ class TestTaskIdentity:
             executor_config={},
         )
         ti.external_executor_id = "remote-a"
-        expected_key = ti.id if native else ti.key
+        expected_key = TaskInstanceUuid(ti.id) if native else ti.key
         mock_executor.batch.describe_jobs.return_value = {
             "jobs": [{"jobId": "remote-a", "status": "RUNNING"}]
         }
@@ -1439,3 +1445,28 @@ class TestTaskIdentity:
         ti.id = uuid4()
         assert mock_executor.active_workers.id_to_key["remote-a"] == expected_key
         assert mock_executor.running == {expected_key}
+
+    @pytest.mark.db_test
+    def test_retry_does_not_adopt_previous_worker(self, mock_executor, create_task_instance, session):
+        ti = create_task_instance(state=TaskInstanceState.RUNNING, external_executor_id="previous-worker")
+        ti.task.retries = 1
+        ti.try_number = 1
+        ti.max_tries = 1
+        session.commit()
+        old_id = ti.id
+
+        ti.handle_failure("worker lost", session=session)
+        session.refresh(ti)
+        history = session.get(TaskInstanceHistory, old_id)
+
+        assert ti.state == TaskInstanceState.UP_FOR_RETRY
+        assert ti.id != old_id
+        assert ti.try_number == 2
+        assert ti.external_executor_id is None
+        assert history.external_executor_id == "previous-worker"
+        ti.state = TaskInstanceState.QUEUED
+        session.flush()
+        assert mock_executor.try_adopt_task_instances([ti]) == [ti]
+        mock_executor.batch.describe_jobs.assert_not_called()
+        assert not mock_executor.running
+        assert not mock_executor.get_event_buffer()

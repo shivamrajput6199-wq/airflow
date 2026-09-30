@@ -364,6 +364,8 @@ The Airflow DB needs to be initialized before it can be used and a user needs to
 
 .. END INIT_DB
 
+.. BEGIN TASK_INSTANCE_IDENTITY
+
 Task-instance identity
 ----------------------
 
@@ -372,3 +374,5 @@ attempt's UUID through dispatch, adoption and completion. On older supported cor
 they retain coordinate keys. This does not raise the provider's minimum Airflow version.
 Existing remote work is adopted using its persisted external identifier; Lambda also
 accepts the older serialized coordinate transport when it matches the adopted attempt.
+
+.. END TASK_INSTANCE_IDENTITY
