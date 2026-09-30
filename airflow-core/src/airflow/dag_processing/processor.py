@@ -23,7 +23,7 @@ import os
 import traceback
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ClassVar, Generic, Literal, TypeVar
 
 import attrs
 from pydantic import BaseModel, Field, TypeAdapter
@@ -639,19 +639,22 @@ def in_process_api_server() -> InProcessExecutionAPI:
     return api
 
 
+_ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+
 @attrs.define(kw_only=True)
-class BaseDagFileProcessorProcess(WatchedSubprocess, LoggingMixin):
+class BaseDagFileProcessorProcess(WatchedSubprocess, LoggingMixin, Generic[_ResultT]):
     """
     Parse one Dag file in a child process for the Dag processor manager.
 
     The child's output goes to the file's parse log, and its requests are answered with
     :attr:`client`. The parse is done once the child has exited and all its sockets are closed;
-    :attr:`parsing_result` then holds what it sent. Subclasses start the child and send it the
-    parse request.
+    :attr:`parsing_result` then holds what it sent. Subclasses start the child, send it the
+    parse request and register the result type they collect.
     """
 
     logger_filehandle: BinaryIO | None = None
-    parsing_result: DagFileParsingResult | None = None
+    parsing_result: _ResultT | None = None
     decoder: ClassVar[TypeAdapter[ToManager]] = TypeAdapter[ToManager](ToManager)
     had_callbacks: bool = False  # Track if this process was started with callbacks to prevent stale DAG detection false positives
 
@@ -685,7 +688,7 @@ class BaseDagFileProcessorProcess(WatchedSubprocess, LoggingMixin):
         )
 
     def _handle_parsing_result(
-        self, msg: DagFileParsingResult, log: FilteringBoundLogger, req_id: int
+        self, msg: _ResultT, log: FilteringBoundLogger, req_id: int
     ) -> RequestResult | ResponseSent:
         self.parsing_result = msg
         return None, {}
@@ -708,7 +711,6 @@ class BaseDagFileProcessorProcess(WatchedSubprocess, LoggingMixin):
             MaskSecret,
             PutVariable,
         ),
-        **dict([register_request_method(DagFileParsingResult, _handle_parsing_result)]),
     }
 
     def _reject_request(self, msg, log: FilteringBoundLogger, req_id: int) -> None:
@@ -745,7 +747,7 @@ class BaseDagFileProcessorProcess(WatchedSubprocess, LoggingMixin):
 
 
 @attrs.define(kw_only=True)
-class DagFileProcessorProcess(BaseDagFileProcessorProcess):
+class DagFileProcessorProcess(BaseDagFileProcessorProcess[DagFileParsingResult]):
     """
     Parses dags with Task SDK API.
 
@@ -757,6 +759,17 @@ class DagFileProcessorProcess(BaseDagFileProcessorProcess):
     """
 
     logger_filehandle: BinaryIO
+
+    _request_handlers: ClassVar[dict[type[BaseModel], RequestHandler[Any]]] = {
+        **BaseDagFileProcessorProcess._request_handlers,
+        **dict(
+            [
+                register_request_method(
+                    DagFileParsingResult, BaseDagFileProcessorProcess._handle_parsing_result
+                )
+            ]
+        ),
+    }
 
     @classmethod
     def start(  # type: ignore[override]
