@@ -230,6 +230,26 @@ class TestBaseLangSDKRuntimeProcess:
 
         assert _task_ids(proc.parsing_result) == ["extract"]
 
+    @patch.object(
+        SDKTaskHandlerProcessorProcess,
+        "_build_start_request",
+        autospec=True,
+        side_effect=RuntimeError("no start request"),
+    )
+    def test_a_start_that_fails_after_the_fork_leaves_nothing_behind(
+        self, mock_build_start_request, tmp_path
+    ):
+        fds_before = _get_open_fds()
+        children_before = {child.pid for child in psutil.Process().children()}
+
+        with selectors.DefaultSelector() as selector:
+            with pytest.raises(RuntimeError, match="no start request"):
+                _start(tmp_path, selector)
+            assert selector.get_map() == {}
+
+        assert {child.pid for child in psutil.Process().children()} == children_before
+        assert _get_open_fds() <= fds_before
+
     @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
     def test_requests_are_answered_by_the_client(self, mock_parse_task_handler, parse):
         def reply(request, comms):
