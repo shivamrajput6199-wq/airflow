@@ -67,7 +67,9 @@ def _reply_with(*task_ids: str, **result):
     """Reply with a handler for each of *task_ids* under the first requested Dag."""
 
     def reply(request: TaskHandlerParseRequest, comms) -> TaskHandlerParsingResult:
-        declarations = [TaskHandlerDeclaration(task_id=task_id, params=[]) for task_id in task_ids]
+        declarations = [
+            TaskHandlerDeclaration(task_id=task_id, binding="positional", params=[]) for task_id in task_ids
+        ]
         return TaskHandlerParsingResult(
             fileloc=request.file, task_handlers={request.dag_ids[0]: declarations}, **result
         )
@@ -632,7 +634,12 @@ def _make_process(**kwargs) -> SDKTaskHandlerProcessorProcess:
 def _result(*task_ids: str) -> TaskHandlerParsingResult:
     return TaskHandlerParsingResult(
         fileloc="/b/etl.artifact",
-        task_handlers={"etl": [TaskHandlerDeclaration(task_id=task_id, params=[]) for task_id in task_ids]},
+        task_handlers={
+            "etl": [
+                TaskHandlerDeclaration(task_id=task_id, binding="positional", params=[])
+                for task_id in task_ids
+            ]
+        },
     )
 
 

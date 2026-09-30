@@ -71,7 +71,11 @@ def test_asks_the_runtime_for_the_handlers_of_the_requested_dags(mock_parse_task
         return TaskHandlerParsingResult(
             fileloc=request.file,
             task_handlers={
-                dag_id: [TaskHandlerDeclaration(task_id=os.fspath(request.bundle_path), params=[param])]
+                dag_id: [
+                    TaskHandlerDeclaration(
+                        task_id=os.fspath(request.bundle_path), binding="positional", params=[param]
+                    )
+                ]
                 for dag_id in request.dag_ids
             },
         )
@@ -81,7 +85,7 @@ def test_asks_the_runtime_for_the_handlers_of_the_requested_dags(mock_parse_task
     result = _run(tmp_path, dag_ids=iter(["etl", "report"]))
 
     param = TaskHandlerParam(name="task-handlers", value_schema={"type": "string"}, required=True)
-    declaration = TaskHandlerDeclaration(task_id=os.fspath(tmp_path), params=[param])
+    declaration = TaskHandlerDeclaration(task_id=os.fspath(tmp_path), binding="positional", params=[param])
     assert result == TaskHandlerParsingResult(
         fileloc=os.fspath(tmp_path / "etl.artifact"),
         task_handlers={"etl": [declaration], "report": [declaration]},
@@ -145,7 +149,9 @@ def test_a_runtime_request_is_answered_by_the_dag_processor(mock_parse_task_hand
         variable = comms.send(GetVariable(key="probe_var"))
         return TaskHandlerParsingResult(
             fileloc=request.file,
-            task_handlers={"etl": [TaskHandlerDeclaration(task_id=variable.value, params=[])]},
+            task_handlers={
+                "etl": [TaskHandlerDeclaration(task_id=variable.value, binding="positional", params=[])]
+            },
         )
 
     mock_parse_task_handler.side_effect = play_runtime(reply)
@@ -176,5 +182,7 @@ def test_a_runtime_request_is_answered_by_the_dag_processor(mock_parse_task_hand
     [probe_result] = proc.parsing_result.warnings
     assert TaskHandlerParsingResult.model_validate(probe_result) == TaskHandlerParsingResult(
         fileloc=os.fspath(artifact),
-        task_handlers={"etl": [TaskHandlerDeclaration(task_id="from-the-dag-processor", params=[])]},
+        task_handlers={
+            "etl": [TaskHandlerDeclaration(task_id="from-the-dag-processor", binding="positional", params=[])]
+        },
     )
