@@ -322,6 +322,34 @@ class TestCoordinatorManager:
         }
         assert manager._created_coordinators == {}
 
+    def test_get_task_handler_bundle_names_does_not_instantiate_coordinator(self, sdk_config):
+        sdk_config(
+            coordinators=json.dumps(
+                {
+                    "named": {
+                        "classpath": f"{_ExplodingCoordinator.__module__}._ExplodingCoordinator",
+                        "kwargs": {"task_handler_bundle_name": "java-task-handlers"},
+                    },
+                    "own-bundle": {"classpath": f"{_ExplodingCoordinator.__module__}._ExplodingCoordinator"},
+                }
+            ),
+        )
+        bundles = [
+            {
+                "name": "java-task-handlers",
+                "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle",
+                "kwargs": {},
+            }
+        ]
+        with conf_vars({("dag_processor", "dag_bundle_config_list"): json.dumps(bundles)}):
+            manager = CoordinatorManager.from_config()
+
+        assert manager.get_task_handler_bundle_names() == {
+            "named": "java-task-handlers",
+            "own-bundle": None,
+        }
+        assert manager._created_coordinators == {}
+
 
 class TestConfigYamlCoordinatorsExample:
     """Guard the ``[sdk] coordinators`` example in ``config.yml`` against drift.

@@ -358,6 +358,17 @@ class CoordinatorManager:
             return None
         return spec.extra
 
+    def get_task_handler_bundle_names(self) -> dict[str, str | None]:
+        """
+        Map each configured coordinator key to its ``task_handler_bundle_name``.
+
+        ``None`` means the coordinator reads task handlers from the task's own Dag bundle.
+        Only the declarative specs are read; no coordinator is instantiated.
+        """
+        return {
+            key: spec.kwargs.get("task_handler_bundle_name") for key, spec in self._coordinator_specs.items()
+        }
+
 
 @functools.cache
 def get_coordinator_manager() -> CoordinatorManager:
