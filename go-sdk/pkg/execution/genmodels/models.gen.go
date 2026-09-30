@@ -1768,6 +1768,7 @@ type TaskHandlerDeclarationBinding string
 const TaskHandlerDeclarationBindingPositional TaskHandlerDeclarationBinding = "positional"
 const TaskHandlerDeclarationBindingNamed TaskHandlerDeclarationBinding = "named"
 const TaskHandlerDeclarationBindingNamedOrWhole TaskHandlerDeclarationBinding = "named_or_whole"
+const TaskHandlerDeclarationBindingNamedOpen TaskHandlerDeclarationBinding = "named_open"
 
 // One parameter of a task handler.
 type TaskHandlerParam struct {
