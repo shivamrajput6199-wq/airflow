@@ -228,9 +228,10 @@ def _exec_runtime(
     Replace the current process with the runtime *command*, which connects back to the given addresses.
 
     *schema_version* is checked, then passed to *report_schema_version* just before the exec. The
-    runtime inherits the standard streams and no other file descriptor.
+    runtime inherits the standard streams and no other file descriptor. It is not started once the
+    process that forked this one has exited.
 
-    :raises Exception: when the version is unknown or the exec fails.
+    :raises Exception: when the version is unknown, the parent has exited, or the exec fails.
     """
     if schema_version is not None:
         get_schema_version_migrator().resolve_version(schema_version)
@@ -239,6 +240,9 @@ def _exec_runtime(
         f"--comm={comm_address[0]}:{comm_address[1]}",
         f"--logs={logs_address[0]}:{logs_address[1]}",
     ]
+    # Taken before the report, which fails if the parent has already exited. A different parent once the
+    # death signal is set means the parent exited in between, and the kernel does not send it for that.
+    parent_pid = os.getppid()
     report_schema_version(schema_version)
     # Python ignores these at startup and exec keeps ignored signals; subprocess.Popen resets
     # them the same way for the task runtime.
@@ -246,6 +250,8 @@ def _exec_runtime(
         if (sig := getattr(signal, name, None)) is not None:
             signal.signal(sig, signal.SIG_DFL)
     _set_parent_death_signal()
+    if os.getppid() != parent_pid:
+        raise RuntimeError("The process that started the runtime has exited")
     _set_close_on_exec_above_stderr()
     os.execvpe(argv[0], argv, _build_runtime_env())
 
