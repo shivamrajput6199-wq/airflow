@@ -55,7 +55,11 @@ from airflow.dag_processing.bundles.base import (
 )
 from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.dag_processing.collection import update_dag_parsing_results_in_db
-from airflow.dag_processing.importer_routing import get_claiming_coordinator
+from airflow.dag_processing.importer_routing import (
+    get_claiming_coordinator,
+    is_other_importer_file,
+    merge_other_importer_files,
+)
 from airflow.dag_processing.lang_sdk_processor import LangSDKDagFileProcessorProcess
 from airflow.dag_processing.processor import (
     BaseDagFileProcessorProcess,
@@ -980,10 +984,12 @@ class DagFileProcessorManager(LoggingMixin):
         """Get relative paths for dag files from bundle dir."""
         # Build up a list of Python files that could contain DAGs
         self.log.info("Searching for files in %s at %s", bundle.name, bundle.path)
-        rel_paths = [
-            Path(x).relative_to(bundle.path)
-            for x in list_py_file_paths(bundle.path, safe_mode=self.dag_discovery_safe_mode)
-        ]
+        file_paths = merge_other_importer_files(
+            bundle,
+            list_py_file_paths(bundle.path, safe_mode=self.dag_discovery_safe_mode),
+            safe_mode=self.dag_discovery_safe_mode,
+        )
+        rel_paths = [Path(x).relative_to(bundle.path) for x in file_paths]
         self.log.info(
             "Found %s files for bundle %s (dag_discovery_safe_mode=%s)",
             len(rel_paths),
@@ -997,8 +1003,8 @@ class DagFileProcessorManager(LoggingMixin):
         """
         Return observed DAG source paths for bundle entries.
 
-        For regular files this includes the relative file path.
-        For ZIP archives this includes DAG-like inner paths such as
+        For regular files, and files of non-Python Dag importers such as JARs, this includes the
+        relative file path. For other ZIP archives this includes DAG-like inner paths such as
         ``archive.zip/dag.py``.
         """
 
@@ -1016,7 +1022,11 @@ class DagFileProcessorManager(LoggingMixin):
         observed_filelocs: set[str] = set()
         for info in present:
             abs_path = str(info.absolute_path)
-            if abs_path.endswith(".py") or not zipfile.is_zipfile(abs_path):
+            if (
+                abs_path.endswith(".py")
+                or is_other_importer_file(info.bundle_name, abs_path)
+                or not zipfile.is_zipfile(abs_path)
+            ):
                 observed_filelocs.add(str(info.rel_path))
             else:
                 if TYPE_CHECKING:

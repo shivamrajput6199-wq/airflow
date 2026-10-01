@@ -91,6 +91,16 @@ from tests_common.test_utils.db import (
     clear_db_serialized_dags,
     clear_db_teams,
 )
+from unit.dag_processing.fake_importers import (
+    ERROR_LISTING_JAR_IMPORTER,
+    FAKE_IMPORTER,
+    JAR_IMPORTER,
+    MEMBER_ERROR_LISTING_JAR_IMPORTER,
+    NON_FILE_LISTING_JAR_IMPORTER,
+    RAISING_LISTING_JAR_IMPORTER,
+    task_sdk_importers,
+    write_jar,
+)
 from unit.dag_processing.fake_lang_sdk import (
     FakeCoordinator,
     fake_coordinator,
@@ -446,6 +456,93 @@ class TestDagFileProcessorManager:
             "test_zip.zip/valid_dag.py",
             "test_zip.zip/broken_dag.py",
         }
+
+    def test_find_files_in_bundle_queues_files_of_other_importers(self, tmp_path):
+        (tmp_path / "python_dag.py").write_text("from airflow.sdk import DAG\n")
+        (tmp_path / "native.fake").write_text("native_dag\n")
+        write_jar(tmp_path / "native.jar", "native_dag")
+        write_jar(tmp_path / "library.jar")
+        bundle = MagicMock(spec=BaseDagBundle)
+        bundle.name = "testing"
+        bundle.path = tmp_path
+
+        with task_sdk_importers(FAKE_IMPORTER, JAR_IMPORTER):
+            found = DagFileProcessorManager(max_runs=1)._find_files_in_bundle(bundle)
+
+        assert sorted(found) == [Path("native.fake"), Path("native.jar"), Path("python_dag.py")]
+
+    @pytest.mark.parametrize("cwd", ["bundle", "elsewhere"])
+    @pytest.mark.parametrize(
+        "importer_config",
+        [
+            pytest.param(ERROR_LISTING_JAR_IMPORTER, id="bundle-relative-discovery-error"),
+            pytest.param(MEMBER_ERROR_LISTING_JAR_IMPORTER, id="archive-member-discovery-error"),
+            pytest.param(RAISING_LISTING_JAR_IMPORTER, id="listing-raises"),
+            pytest.param(
+                {"classpath": "unit.dag_processing.missing.Importer", "extensions": [".jar"]},
+                id="importer-cannot-load",
+            ),
+            pytest.param(
+                {"classpath": "airflow.sdk.importers.ZipImporter", "extensions": [".jar"]},
+                id="archive-member-importer",
+            ),
+        ],
+    )
+    def test_find_files_in_bundle_keeps_other_importer_files_when_listing_fails(
+        self, tmp_path, monkeypatch, importer_config, cwd
+    ):
+        bundle_path = tmp_path / "bundle"
+        bundle_path.mkdir()
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path / cwd)
+        (bundle_path / "python_dag.py").write_text("from airflow.sdk import DAG\n")
+        write_jar(bundle_path / "native.jar", "native_dag")
+        write_jar(bundle_path / "library.jar")
+        bundle = MagicMock(spec=BaseDagBundle)
+        bundle.name = "testing"
+        bundle.path = bundle_path
+
+        with task_sdk_importers(importer_config):
+            found = DagFileProcessorManager(max_runs=1)._find_files_in_bundle(bundle)
+
+        assert sorted(found) == [Path("library.jar"), Path("native.jar"), Path("python_dag.py")]
+
+    def test_find_files_in_bundle_skips_a_listed_definition_that_is_not_a_file(self, tmp_path):
+        write_jar(tmp_path / "native.jar", "native_dag")
+        bundle = MagicMock(spec=BaseDagBundle)
+        bundle.name = "testing"
+        bundle.path = tmp_path
+
+        with task_sdk_importers(NON_FILE_LISTING_JAR_IMPORTER):
+            found = DagFileProcessorManager(max_runs=1)._find_files_in_bundle(bundle)
+
+        assert found == [Path("native.jar")]
+
+    def test_get_observed_filelocs_keeps_an_other_importer_archive_whole(self, tmp_path):
+        write_jar(tmp_path / "native.jar", "native_dag")
+
+        with task_sdk_importers(JAR_IMPORTER):
+            observed_filelocs = DagFileProcessorManager(max_runs=1)._get_observed_filelocs(
+                {DagFileInfo(bundle_name="testing", rel_path=Path("native.jar"), bundle_path=tmp_path)}
+            )
+
+        assert observed_filelocs == {"native.jar"}
+
+    def test_jar_without_an_importer_keeps_the_zip_handling(self, tmp_path):
+        write_jar(tmp_path / "native.jar", "native_dag")
+        bundle = MagicMock(spec=BaseDagBundle)
+        bundle.name = "testing"
+        bundle.path = tmp_path
+
+        with task_sdk_importers():
+            manager = DagFileProcessorManager(max_runs=1)
+            found = manager._find_files_in_bundle(bundle)
+            observed_filelocs = manager._get_observed_filelocs(
+                {DagFileInfo(bundle_name="testing", rel_path=Path("native.jar"), bundle_path=tmp_path)}
+            )
+
+        assert found == [Path("native.jar")]
+        assert observed_filelocs == {"native.jar/dag.py"}
 
     def test_sync_bundles_deactivates_missing_when_owning_all_bundles(self):
         """A processor with no bundle filter owns the full config and may deactivate missing bundles."""
