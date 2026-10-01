@@ -17,6 +17,7 @@
 # under the License.
 from __future__ import annotations
 
+import io
 import os
 import time
 from unittest.mock import MagicMock, patch
@@ -36,7 +37,7 @@ from airflow.dag_processing.processor import (
     ToManager,
 )
 from airflow.dag_processing.task_handler_processor import SDKTaskHandlerProcessorProcess
-from airflow.sdk.api.client import Client
+from airflow.sdk.api.client import Client, VariableOperations
 from airflow.sdk.api.datamodels._generated import VariableResponse
 from airflow.sdk.exceptions import AirflowRuntimeError
 from airflow.sdk.execution_time import task_runner
@@ -156,7 +157,7 @@ def test_a_runtime_request_is_answered_by_the_dag_processor(mock_parse_task_hand
 
     mock_parse_task_handler.side_effect = play_runtime(reply)
     client = MagicMock(spec=Client)
-    client.variables = MagicMock()
+    client.variables = MagicMock(spec=VariableOperations)
     client.variables.get.return_value = VariableResponse(key="probe_var", value="from-the-dag-processor")
     artifact = write_artifact(tmp_path / "etl.artifact")
 
@@ -169,7 +170,7 @@ def test_a_runtime_request_is_answered_by_the_dag_processor(mock_parse_task_hand
         callbacks=[],
         target=_probe_from_a_dag_parsing_child,
         logger=structlog.get_logger(),
-        logger_filehandle=MagicMock(),
+        logger_filehandle=io.BytesIO(),
         client=client,
     )
     deadline = time.monotonic() + 30

@@ -33,6 +33,7 @@ from unittest.mock import ANY, MagicMock, patch
 import psutil
 import pytest
 import structlog
+from structlog.typing import FilteringBoundLogger
 
 from airflow.configuration import conf
 from airflow.dag_processing.lang_sdk_runtime import LangSDKRuntimeSchemaVersion, _get_import_timeout
@@ -42,7 +43,7 @@ from airflow.dag_processing.processor import (
     TaskHandlerParsingResult,
 )
 from airflow.dag_processing.task_handler_processor import SDKTaskHandlerProcessorProcess
-from airflow.sdk.api.client import Client
+from airflow.sdk.api.client import Client, VariableOperations
 from airflow.sdk.api.datamodels._generated import VariableResponse
 from airflow.sdk.coordinators._subprocess import SubprocessCoordinator
 from airflow.sdk.exceptions import AirflowRuntimeError, ErrorType
@@ -260,7 +261,7 @@ class TestBaseLangSDKRuntimeProcess:
 
         mock_parse_task_handler.side_effect = play_runtime(reply)
         client = MagicMock(spec=Client)
-        client.variables = MagicMock()
+        client.variables = MagicMock(spec=VariableOperations)
         client.variables.get.return_value = VariableResponse(key="probe_var", value="from-the-client")
 
         proc = parse(client=client)
@@ -616,10 +617,10 @@ def _make_process(**kwargs) -> SDKTaskHandlerProcessorProcess:
     return SDKTaskHandlerProcessorProcess(
         id=uuid.uuid4(),
         pid=1,
-        stdin=MagicMock(),
-        process=MagicMock(),
-        process_log=MagicMock(),
-        selector=MagicMock(),
+        stdin=MagicMock(spec=socket.socket),
+        process=MagicMock(spec=supervisor.ProcessTracker),
+        process_log=MagicMock(spec=FilteringBoundLogger),
+        selector=MagicMock(spec=selectors.BaseSelector),
         bundle_name="task-handlers",
         dag_file_rel_path="etl.artifact",
         coordinator="fake",
@@ -647,8 +648,8 @@ def _result(*task_ids: str) -> TaskHandlerParsingResult:
 def test_the_first_parse_result_wins(mock_send_msg):
     proc = _make_process()
 
-    proc._handle_request(_result("first"), MagicMock(), 1)
-    proc._handle_request(_result("second"), MagicMock(), 2)
+    proc._handle_request(_result("first"), structlog.get_logger(), 1)
+    proc._handle_request(_result("second"), structlog.get_logger(), 2)
 
     assert _task_ids(proc.parsing_result) == ["first"]
     assert mock_send_msg.call_args.kwargs["error"].detail == {
@@ -698,8 +699,10 @@ def test_an_invalid_message_after_the_parse_result_keeps_it(mock_send_msg, mock_
 def test_the_schema_version_is_reported_once(mock_send_msg):
     proc = _make_process()
 
-    proc._handle_request(LangSDKRuntimeSchemaVersion(schema_version=OLDEST_SCHEMA_VERSION), MagicMock(), 1)
-    proc._handle_request(LangSDKRuntimeSchemaVersion(schema_version=None), MagicMock(), 2)
+    proc._handle_request(
+        LangSDKRuntimeSchemaVersion(schema_version=OLDEST_SCHEMA_VERSION), structlog.get_logger(), 1
+    )
+    proc._handle_request(LangSDKRuntimeSchemaVersion(schema_version=None), structlog.get_logger(), 2)
 
     assert proc._runtime_schema_version == OLDEST_SCHEMA_VERSION
     assert mock_send_msg.call_args.kwargs["error"].detail["message"] == "Unhandled request"
