@@ -80,7 +80,7 @@ def _reply_with(*task_ids: str, **result):
     return reply
 
 
-def _task_ids(result: TaskHandlerParsingResult) -> list[str]:
+def _get_task_ids(result: TaskHandlerParsingResult) -> list[str]:
     return [declaration.task_id for declaration in result.task_handlers["etl"]]
 
 
@@ -213,7 +213,7 @@ class TestBaseLangSDKRuntimeProcess:
 
         assert proc.parsing_result.fileloc == os.fspath(tmp_path / "etl.artifact")
         assert proc.parsing_result.import_errors is None
-        assert _task_ids(proc.parsing_result) == ["extract"]
+        assert _get_task_ids(proc.parsing_result) == ["extract"]
         assert proc._subprocess_schema_version == OLDEST_SCHEMA_VERSION
         assert "Registering handlers" in cap_structlog
 
@@ -238,7 +238,7 @@ class TestBaseLangSDKRuntimeProcess:
                 proc._service_subprocess(max_wait_time=0.1)
             proc.close()
 
-        assert _task_ids(proc.parsing_result) == ["extract"]
+        assert _get_task_ids(proc.parsing_result) == ["extract"]
 
     @patch.object(
         SDKTaskHandlerProcessorProcess,
@@ -285,7 +285,7 @@ class TestBaseLangSDKRuntimeProcess:
 
         proc = parse(client=client)
 
-        assert _task_ids(proc.parsing_result) == ["from-the-client"]
+        assert _get_task_ids(proc.parsing_result) == ["from-the-client"]
 
     @pytest.mark.parametrize(
         ("spec", "reply", "error"),
@@ -403,7 +403,7 @@ class TestBaseLangSDKRuntimeProcess:
 
         proc = parse()
 
-        assert _task_ids(proc.parsing_result) == ["extract"]
+        assert _get_task_ids(proc.parsing_result) == ["extract"]
         assert proc._exit_code == -signal.SIGKILL
         assert "The Lang-SDK runtime did not exit after its parse result; killing it" in cap_structlog
 
@@ -503,7 +503,7 @@ class TestRequestsWithoutAClient:
 
         proc = parse()
 
-        assert _task_ids(proc.parsing_result) == ["from-the-parent"]
+        assert _get_task_ids(proc.parsing_result) == ["from-the-parent"]
         supervisor_comms.send.assert_called_once_with(GetVariable(key="probe_var"))
 
     @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
@@ -521,7 +521,7 @@ class TestRequestsWithoutAClient:
 
         proc = parse()
 
-        assert _task_ids(proc.parsing_result) == [f"{ErrorType.VARIABLE_NOT_FOUND.value}:probe_var"]
+        assert _get_task_ids(proc.parsing_result) == [f"{ErrorType.VARIABLE_NOT_FOUND.value}:probe_var"]
 
     @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
     def test_a_request_gets_an_error_without_a_parent(self, mock_parse_task_handler, monkeypatch, tmp_path):
@@ -536,7 +536,7 @@ class TestRequestsWithoutAClient:
 
         result = _run(tmp_path)
 
-        assert _task_ids(result) == ["GetVariable is answered only in the Dag processor"]
+        assert _get_task_ids(result) == ["GetVariable is answered only in the Dag processor"]
 
     @patch("airflow.sdk.log._secrets_masker", autospec=True)
     @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
@@ -551,7 +551,7 @@ class TestRequestsWithoutAClient:
 
         proc = parse()
 
-        assert _task_ids(proc.parsing_result) == ["extract"]
+        assert _get_task_ids(proc.parsing_result) == ["extract"]
         mock_secrets_masker.return_value.add_mask.assert_called_once_with("probe-secret", "probe_conn")
         supervisor_comms.send.assert_called_once_with(MaskSecret(value="probe-secret", name="probe_conn"))
 
@@ -652,7 +652,7 @@ def _make_process(**kwargs) -> SDKTaskHandlerProcessorProcess:
     )
 
 
-def _result(*task_ids: str) -> TaskHandlerParsingResult:
+def _build_result(*task_ids: str) -> TaskHandlerParsingResult:
     return TaskHandlerParsingResult(
         fileloc="/b/etl.artifact",
         task_handlers={
@@ -668,10 +668,10 @@ def _result(*task_ids: str) -> TaskHandlerParsingResult:
 def test_the_first_parse_result_wins(mock_send_msg):
     proc = _make_process()
 
-    proc._handle_request(_result("first"), structlog.get_logger(), 1)
-    proc._handle_request(_result("second"), structlog.get_logger(), 2)
+    proc._handle_request(_build_result("first"), structlog.get_logger(), 1)
+    proc._handle_request(_build_result("second"), structlog.get_logger(), 2)
 
-    assert _task_ids(proc.parsing_result) == ["first"]
+    assert _get_task_ids(proc.parsing_result) == ["first"]
     assert mock_send_msg.call_args.kwargs["error"].detail == {
         "message": "A parse result was already received"
     }
@@ -702,12 +702,12 @@ def test_an_invalid_message_after_the_parse_result_keeps_it(mock_send_msg, mock_
     with runtime, conn:
         proc._register_comm(conn)
         read_frame, _ = proc.selector.register.call_args.args[2]
-        runtime.sendall(_RequestFrame(id=1, body=_result("extract").model_dump(mode="json")).as_bytes())
+        runtime.sendall(_RequestFrame(id=1, body=_build_result("extract").model_dump(mode="json")).as_bytes())
         assert read_frame(conn)
         runtime.sendall(invalid_frame)
         assert not read_frame(conn)
 
-    assert _task_ids(proc.parsing_result) == ["extract"]
+    assert _get_task_ids(proc.parsing_result) == ["extract"]
     assert proc.parsing_result.import_errors is None
     proc.process_log.warning.assert_called_once_with(
         "Ignoring an invalid message from the Lang-SDK runtime after its parse result", error=ANY
