@@ -324,15 +324,15 @@ class TestBaseLangSDKRuntimeProcess:
             ),
         ],
     )
-    def test_a_failed_parse_is_an_import_error(self, parse, tmp_path, spec, reply, error):
-        with (
-            patch.object(
-                FakeCoordinator, "parse_task_handler", autospec=True, side_effect=play_runtime(reply)
-            )
-            if reply
-            else contextlib.nullcontext()
-        ):
-            proc = parse(**spec)
+    @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
+    def test_a_failed_parse_is_an_import_error(
+        self, mock_parse_task_handler, parse, tmp_path, spec, reply, error
+    ):
+        mock_parse_task_handler.side_effect = (
+            play_runtime(reply) if reply else SubprocessCoordinator.parse_task_handler
+        )
+
+        proc = parse(**spec)
 
         assert proc.parsing_result == TaskHandlerParsingResult(
             fileloc=os.fspath(tmp_path / "etl.artifact"),
@@ -447,19 +447,19 @@ class TestBaseLangSDKRuntimeProcess:
     @pytest.mark.parametrize(
         ("policy", "error"),
         [
+            pytest.param(RuntimeError("policy bug"), "RuntimeError: policy bug", id="raises"),
             pytest.param(
-                {"side_effect": RuntimeError("policy bug")}, "RuntimeError: policy bug", id="raises"
-            ),
-            pytest.param(
-                {"return_value": "30"},
+                lambda path: "30",
                 "TypeError: Value (30) from get_dagbag_import_timeout must be int or float",
                 id="not-a-number",
             ),
         ],
     )
-    def test_a_failing_import_timeout_policy_is_an_import_error(self, parse, policy, error):
-        with patch("airflow.settings.get_dagbag_import_timeout", autospec=True, **policy):
-            proc = parse()
+    @patch("airflow.settings.get_dagbag_import_timeout", autospec=True)
+    def test_a_failing_import_timeout_policy_is_an_import_error(self, mock_timeout, parse, policy, error):
+        mock_timeout.side_effect = policy
+
+        proc = parse()
 
         assert proc.parsing_result.import_errors == {
             "etl.artifact": f"Cannot start the Lang-SDK runtime: {error}"
@@ -560,27 +560,25 @@ class TestRun:
     @pytest.mark.execution_timeout(30)
     @pytest.mark.parametrize("connected", [False, True], ids=["before-connecting", "after-connecting"])
     @patch("airflow.settings.get_dagbag_import_timeout", autospec=True, return_value=1)
-    def test_a_parse_past_the_import_timeout_is_killed(self, mock_timeout, tmp_path, connected):
+    @patch.object(
+        SDKTaskHandlerProcessorProcess,
+        "close",
+        autospec=True,
+        side_effect=SDKTaskHandlerProcessorProcess.close,
+    )
+    @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
+    def test_a_parse_past_the_import_timeout_is_killed(
+        self, mock_parse_task_handler, mock_close, mock_timeout, tmp_path, connected
+    ):
+        mock_parse_task_handler.side_effect = (
+            play_runtime(lambda request, comms: _block_until_killed(comms))
+            if connected
+            else SubprocessCoordinator.parse_task_handler
+        )
         # A runtime that never connects leaves both listeners open when it is killed.
         fds_before = _get_open_fds()
 
-        with (
-            patch.object(
-                FakeCoordinator,
-                "parse_task_handler",
-                autospec=True,
-                side_effect=play_runtime(lambda request, comms: _block_until_killed(comms)),
-            )
-            if connected
-            else contextlib.nullcontext(),
-            patch.object(
-                SDKTaskHandlerProcessorProcess,
-                "close",
-                autospec=True,
-                side_effect=SDKTaskHandlerProcessorProcess.close,
-            ) as mock_close,
-        ):
-            result = _run(tmp_path, argv=["/bin/sh", "-c", "exec sleep 60"])
+        result = _run(tmp_path, argv=["/bin/sh", "-c", "exec sleep 60"])
 
         assert result.import_errors == {
             "etl.artifact": f"The Lang-SDK runtime did not parse {tmp_path / 'etl.artifact'} within 1.0s"
