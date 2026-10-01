@@ -38,6 +38,7 @@ from structlog.typing import FilteringBoundLogger
 from airflow.configuration import conf
 from airflow.dag_processing.lang_sdk_runtime import LangSDKRuntimeSchemaVersion, _get_import_timeout
 from airflow.dag_processing.processor import (
+    BaseDagFileProcessorProcess,
     TaskHandlerDeclaration,
     TaskHandlerParseRequest,
     TaskHandlerParsingResult,
@@ -251,6 +252,18 @@ class TestBaseLangSDKRuntimeProcess:
             assert selector.get_map() == {}
 
         assert {child.pid for child in psutil.Process().children()} == children_before
+        assert _get_open_fds() <= fds_before
+
+    @patch.object(BaseDagFileProcessorProcess, "start", autospec=True, side_effect=OSError("fork failed"))
+    def test_a_start_that_fails_before_the_fork_closes_its_listeners(self, mock_start, tmp_path):
+        fds_before = _get_open_fds()
+
+        with selectors.DefaultSelector() as selector:
+            with pytest.raises(OSError, match="fork failed"):
+                _start(tmp_path, selector)
+
+        listeners = mock_start.call_args.kwargs["listeners"]
+        assert [listener.fileno() for listener in listeners.values()] == [-1, -1]
         assert _get_open_fds() <= fds_before
 
     @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
