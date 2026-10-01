@@ -76,7 +76,11 @@ from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance, _send_er
 from airflow.sdk.importers import DagSourceCode  # noqa: TC001
 from airflow.serialization.definitions.dag import SerializedDAG
 from airflow.serialization.serialized_objects import DagSerialization, LazyDeserializedDAG
-from airflow.utils.dag_version_inflation_checker import check_dag_file_stability
+from airflow.utils.dag_version_inflation_checker import (
+    DagVersionInflationCheckLevel,
+    DagVersionInflationCheckResult,
+    check_dag_file_stability,
+)
 from airflow.utils.file import iter_airflow_imports
 from airflow.utils.helpers import prune_dict
 from airflow.utils.log.logging_mixin import LoggingMixin
@@ -175,6 +179,11 @@ ToDagProcessor = Annotated[
 ]
 
 
+def _is_python_source(file_path: str | os.PathLike[str]) -> bool:
+    """Return whether a Dag file is Python source, which the AST-based pre-parse steps can read."""
+    return Path(file_path).suffix.lower() == ".py"
+
+
 def _pre_import_airflow_modules(file_path: str, log: FilteringBoundLogger) -> None:
     """
     Pre-import Airflow modules found in the given file.
@@ -186,6 +195,8 @@ def _pre_import_airflow_modules(file_path: str, log: FilteringBoundLogger) -> No
     :param file_path: Path to the file to scan for imports
     :param log: Logger instance to use for warnings
     """
+    if not _is_python_source(file_path):
+        return
     if not conf.getboolean("dag_processor", "parsing_pre_import_modules", fallback=True):
         return
 
@@ -226,7 +237,11 @@ def _parse_file_entrypoint():
 def _parse_file(msg: DagFileParseRequest, log: FilteringBoundLogger) -> DagFileParsingResult | None:
     # TODO: Set known_pool names on DagBag!
 
-    stability_check_result = check_dag_file_stability(os.fspath(msg.file))
+    stability_check_result = (
+        check_dag_file_stability(os.fspath(msg.file))
+        if _is_python_source(msg.file)
+        else DagVersionInflationCheckResult(check_level=DagVersionInflationCheckLevel.off)
+    )
 
     # Callback runs must not be blocked by the stability check: callbacks for
     # already-scheduled runs still have to execute, and they never produce a

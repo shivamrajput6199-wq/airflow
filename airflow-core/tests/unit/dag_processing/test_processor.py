@@ -94,6 +94,7 @@ from airflow.utils.session import create_session
 from airflow.utils.state import TaskInstanceState
 
 from tests_common.test_utils.config import conf_vars, env_vars
+from unit.dag_processing.fake_importers import FAKE_IMPORTER, task_sdk_importers
 
 if TYPE_CHECKING:
     from kgb import SpyAgency
@@ -433,6 +434,16 @@ class TestDagFileProcessor:
         mock_iter.assert_not_called()
         logger.warning.assert_not_called()
 
+    def test__pre_import_airflow_modules_skips_non_python_files(self):
+        logger = MagicMock(spec=FilteringBoundLogger)
+        with (
+            env_vars({"AIRFLOW__DAG_PROCESSOR__PARSING_PRE_IMPORT_MODULES": "true"}),
+            patch("airflow.dag_processing.processor.iter_airflow_imports") as mock_iter,
+        ):
+            _pre_import_airflow_modules("bundle.jar", logger)
+
+        mock_iter.assert_not_called()
+
     def test__pre_import_airflow_modules_when_enabled(self):
         logger = MagicMock(spec=FilteringBoundLogger)
         with (
@@ -693,6 +704,26 @@ def test_parse_file_with_task_callbacks(spy_agency):
     )
 
     assert called is True
+
+
+def test_parse_file_skips_python_checks_for_other_importers(tmp_path):
+    native = tmp_path / "native.fake"
+    native.write_text("native_dag\n")
+
+    with (
+        task_sdk_importers(FAKE_IMPORTER),
+        patch("airflow.dag_processing.processor.check_dag_file_stability", autospec=True) as stability_check,
+    ):
+        result = _parse_file(
+            DagFileParseRequest(file=str(native), bundle_path=tmp_path, bundle_name="testing"),
+            log=structlog.get_logger(),
+        )
+
+    assert result is not None
+    assert result.import_errors == {}
+    assert [dag.dag_id for dag in result.serialized_dags] == ["native_dag"]
+    assert result.serialized_dags[0].data["dag"]["relative_fileloc"] == "native.fake"
+    stability_check.assert_not_called()
 
 
 @conf_vars({("dag_processor", "dag_version_inflation_check_level"): "error"})
