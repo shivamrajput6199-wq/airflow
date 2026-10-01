@@ -589,13 +589,13 @@ repository.
 
 Yes! Be sure to abide by the Apache Foundation [trademark policies](https://www.apache.org/foundation/marks/#books) and the Apache Airflow [Brandbook](https://cwiki.apache.org/confluence/display/AIRFLOW/Brandbook). The most up-to-date logos are found in [this repo](https://github.com/apache/airflow/tree/main/airflow-core/docs/img/logos/) and on the Apache Software Foundation [website](https://www.apache.org/logos/about.html).
 
-## Links
+# Links
 
 - [Documentation](https://airflow.apache.org/docs/apache-airflow/stable/)
 - [Chat](https://s.apache.org/airflow-slack)
 - [Community Information](https://airflow.apache.org/community/)
 
-## Sponsors
+#  Sponsors
 
 The CI infrastructure for Apache Airflow has been sponsored by:
 
