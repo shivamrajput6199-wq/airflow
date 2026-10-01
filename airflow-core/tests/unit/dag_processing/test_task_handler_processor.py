@@ -52,20 +52,19 @@ def _coordinator():
         yield
 
 
-def _run(tmp_path, *, coordinator: str = "fake", dag_ids=("etl",)) -> TaskHandlerParsingResult:
+def _run(tmp_path, *, coordinator: str = "fake") -> TaskHandlerParsingResult:
     return SDKTaskHandlerProcessorProcess.run(
         coordinator=coordinator,
         path=write_artifact(tmp_path / "etl.artifact"),
         bundle_path=tmp_path,
         bundle_name="task-handlers",
         artifact_rel_path="etl.artifact",
-        dag_ids=dag_ids,
         logger=structlog.get_logger(),
     )
 
 
 @patch.object(FakeCoordinator, "parse_task_handler", autospec=True)
-def test_asks_the_runtime_for_the_handlers_of_the_requested_dags(mock_parse_task_handler, tmp_path):
+def test_returns_every_handler_the_runtime_registers(mock_parse_task_handler, tmp_path):
     def reply(request, comms):
         # Echo what the request carries, so the test can check it.
         param = TaskHandlerParam(name=request.bundle_name, value_schema={"type": "string"}, required=True)
@@ -77,13 +76,13 @@ def test_asks_the_runtime_for_the_handlers_of_the_requested_dags(mock_parse_task
                         task_id=os.fspath(request.bundle_path), binding="positional", params=[param]
                     )
                 ]
-                for dag_id in request.dag_ids
+                for dag_id in ("etl", "report")
             },
         )
 
     mock_parse_task_handler.side_effect = play_runtime(reply)
 
-    result = _run(tmp_path, dag_ids=iter(["etl", "report"]))
+    result = _run(tmp_path)
 
     param = TaskHandlerParam(name="task-handlers", value_schema={"type": "string"}, required=True)
     declaration = TaskHandlerDeclaration(task_id=os.fspath(tmp_path), binding="positional", params=[param])
@@ -134,7 +133,6 @@ def _probe_from_a_dag_parsing_child() -> None:
         bundle_path=request.bundle_path,
         bundle_name=request.bundle_name,
         artifact_rel_path="etl.artifact",
-        dag_ids=["etl"],
         logger=structlog.get_logger(logger_name="task"),
     )
     comms_decoder.send(

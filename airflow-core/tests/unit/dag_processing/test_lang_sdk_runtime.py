@@ -67,15 +67,13 @@ OLDEST_SCHEMA_VERSION = "2026-06-16"
 
 
 def _reply_with(*task_ids: str, **result):
-    """Reply with a handler for each of *task_ids* under the first requested Dag."""
+    """Reply with a handler for each of *task_ids* under the Dag ``etl``."""
 
     def reply(request: TaskHandlerParseRequest, comms) -> TaskHandlerParsingResult:
         declarations = [
             TaskHandlerDeclaration(task_id=task_id, binding="positional", params=[]) for task_id in task_ids
         ]
-        return TaskHandlerParsingResult(
-            fileloc=request.file, task_handlers={request.dag_ids[0]: declarations}, **result
-        )
+        return TaskHandlerParsingResult(fileloc=request.file, task_handlers={"etl": declarations}, **result)
 
     return reply
 
@@ -134,7 +132,6 @@ def _start(tmp_path, selector, *, client: Client | None = None, **spec) -> SDKTa
         bundle_path=tmp_path,
         bundle_name="task-handlers",
         artifact_rel_path="etl.artifact",
-        dag_ids=["etl"],
         selector=selector,
         logger=structlog.get_logger(),
         client=client,
@@ -193,7 +190,6 @@ def _run(tmp_path, **spec) -> TaskHandlerParsingResult:
         bundle_path=tmp_path,
         bundle_name="task-handlers",
         artifact_rel_path="etl.artifact",
-        dag_ids=["etl"],
         logger=structlog.get_logger(),
     )
 
@@ -646,7 +642,7 @@ def _make_process(**kwargs) -> SDKTaskHandlerProcessorProcess:
         coordinator="fake",
         listeners={},
         parse_request=TaskHandlerParseRequest(
-            file="/b/etl.artifact", dag_ids=["etl"], bundle_path=Path("/b"), bundle_name="task-handlers"
+            file="/b/etl.artifact", bundle_path=Path("/b"), bundle_name="task-handlers"
         ),
         **kwargs,
     )

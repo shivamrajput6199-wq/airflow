@@ -34,7 +34,7 @@ from airflow.sdk.execution_time.coordinator import get_coordinator_manager
 from airflow.sdk.execution_time.supervisor import register_request_method
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
     from pydantic import BaseModel
     from structlog.typing import FilteringBoundLogger
@@ -72,7 +72,7 @@ class SDKTaskHandlerProcessorProcess(
     BaseLangSDKRuntimeProcess[TaskHandlerParseRequest, TaskHandlerParsingResult]
 ):
     """
-    Ask a coordinator's runtime which task handlers an artifact registers for some Dags.
+    Ask a coordinator's runtime for every task handler an artifact registers.
 
     It runs in a Dag-parsing child, which has no API client, so the runtime's requests are relayed to
     the Dag processor. A failure is an import error on the result, keyed by the artifact's path in its
@@ -92,11 +92,10 @@ class SDKTaskHandlerProcessorProcess(
         bundle_path: Path,
         bundle_name: str,
         artifact_rel_path: str,
-        dag_ids: Iterable[str],
         **kwargs,
     ) -> Self:
         """
-        Start probing the artifact at *path* for the handlers it registers for *dag_ids*.
+        Start probing the artifact at *path* for every task handler it registers.
 
         *bundle_path* and *bundle_name* are those of the Dag bundle holding the artifact, and
         *artifact_rel_path* is the artifact's path in it.
@@ -105,7 +104,6 @@ class SDKTaskHandlerProcessorProcess(
             target=_parse_task_handler_entrypoint,
             parse_request=TaskHandlerParseRequest(
                 file=os.fspath(path),
-                dag_ids=list(dag_ids),
                 bundle_path=bundle_path,
                 bundle_name=bundle_name,
             ),
@@ -124,7 +122,6 @@ class SDKTaskHandlerProcessorProcess(
         bundle_path: Path,
         bundle_name: str,
         artifact_rel_path: str,
-        dag_ids: Iterable[str],
         logger: FilteringBoundLogger,
     ) -> TaskHandlerParsingResult:
         """
@@ -139,7 +136,6 @@ class SDKTaskHandlerProcessorProcess(
             bundle_path=bundle_path,
             bundle_name=bundle_name,
             artifact_rel_path=artifact_rel_path,
-            dag_ids=dag_ids,
             logger=logger,
         )
 
