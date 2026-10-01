@@ -28,6 +28,7 @@ draining machinery in this module rather than re-implementing it.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import ipaddress
 import itertools
 import os
@@ -196,8 +197,6 @@ def _set_parent_death_signal() -> None:
     if sys.platform != "linux":
         return
     try:
-        import ctypes
-
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
             log.warning("Failed to set PR_SET_PDEATHSIG", errno=ctypes.get_errno())
