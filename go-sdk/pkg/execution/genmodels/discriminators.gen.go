@@ -107,6 +107,7 @@ const (
 	TypeTaskStateStoreResult        = "TaskStateStoreResult"
 	TypeTaskStatesResult            = "TaskStatesResult"
 	TypeTriggerDagRun               = "TriggerDagRun"
+	TypeUpdateDagRunNote            = "UpdateDagRunNote"
 	TypeUpdateHITLDetail            = "UpdateHITLDetail"
 	TypeValidateInletsAndOutlets    = "ValidateInletsAndOutlets"
 	TypeVariableKeysResult          = "VariableKeysResult"
@@ -371,6 +372,9 @@ func EnsureType(m any) any {
 		return b
 	case TriggerDagRun:
 		b.Type = TypeTriggerDagRun
+		return b
+	case UpdateDagRunNote:
+		b.Type = TypeUpdateDagRunNote
 		return b
 	case UpdateHITLDetail:
 		b.Type = TypeUpdateHITLDetail

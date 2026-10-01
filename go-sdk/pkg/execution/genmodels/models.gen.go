@@ -1799,17 +1799,13 @@ type TaskHandlerDeclaration struct {
 
 // Request for Task Handler Parsing.
 //
-// Asks a Lang-SDK runtime which task handlers an artifact registers for the given
-// Dags.
+// Asks a Lang-SDK runtime for every task handler an artifact registers.
 type TaskHandlerParseRequest struct {
 	// BundleName corresponds to the JSON schema field "bundle_name".
 	BundleName string `msgpack:"bundle_name"`
 
 	// BundlePath corresponds to the JSON schema field "bundle_path".
 	BundlePath string `msgpack:"bundle_path"`
-
-	// DagIds corresponds to the JSON schema field "dag_ids".
-	DagIds []string `msgpack:"dag_ids"`
 
 	// File corresponds to the JSON schema field "file".
 	File string `msgpack:"file"`
@@ -1822,7 +1818,9 @@ type TaskHandlers map[string][]TaskHandlerDeclaration
 
 // Result of Task Handler Parsing.
 //
-// The task handlers a Lang-SDK artifact registers, keyed by Dag id.
+// Every task handler a Lang-SDK artifact registers, keyed by Dag id.
+//
+// The answer depends only on the artifact, never on the request.
 type TaskHandlerParsingResult struct {
 	// Fileloc corresponds to the JSON schema field "fileloc".
 	Fileloc string `msgpack:"fileloc"`
@@ -1922,6 +1920,17 @@ type TriggerDagRun struct {
 
 	// RunID corresponds to the JSON schema field "run_id".
 	RunID string `msgpack:"run_id"`
+
+	// Type corresponds to the JSON schema field "type".
+	Type string `msgpack:"type,omitempty"`
+}
+
+type UpdateDagRunNote struct {
+	// Note corresponds to the JSON schema field "note".
+	Note interface{} `msgpack:"note"`
+
+	// TIID corresponds to the JSON schema field "ti_id".
+	TIID string `msgpack:"ti_id"`
 
 	// Type corresponds to the JSON schema field "type".
 	Type string `msgpack:"type,omitempty"`
