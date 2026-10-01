@@ -25,6 +25,7 @@ import selectors
 import signal
 import socket
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -160,14 +161,19 @@ def parse(tmp_path):
     return _parse
 
 
+def _block_until_killed(comms) -> None:
+    """Hang as a stuck runtime does, until it is killed or the parent closes the comm socket."""
+    comms.socket.recv(1)
+
+
 def _send_an_invalid_frame(request, comms) -> None:
     comms.socket.sendall(bytes.fromhex("00000003c1c1c1"))
-    time.sleep(60)
+    _block_until_killed(comms)
 
 
 def _send_a_frame(comms, body: dict) -> None:
     comms.socket.sendall(_RequestFrame(id=1, body=body).as_bytes())
-    time.sleep(60)
+    _block_until_killed(comms)
 
 
 def _send_an_invalid_result(request, comms) -> None:
@@ -391,7 +397,7 @@ class TestBaseLangSDKRuntimeProcess:
     ):
         def reply(request, comms):
             comms.send(_reply_with("extract")(request, comms))
-            time.sleep(60)
+            _block_until_killed(comms)
 
         mock_parse_task_handler.side_effect = play_runtime(reply)
 
@@ -414,6 +420,7 @@ class TestBaseLangSDKRuntimeProcess:
             assert proc.parsing_result.import_errors == {
                 "etl.artifact": "The Lang-SDK runtime exited with code 0 without a parse result"
             }
+            # A poll: the leftover is not a child to wait for, and time_machine cannot reach another process.
             deadline = time.monotonic() + 10
             while _is_running(leftover):
                 assert time.monotonic() < deadline, "the runtime's leftover process is still running"
@@ -550,6 +557,7 @@ class TestRequestsWithoutAClient:
 
 
 class TestRun:
+    @pytest.mark.execution_timeout(30)
     @pytest.mark.parametrize("connected", [False, True], ids=["before-connecting", "after-connecting"])
     @patch("airflow.settings.get_dagbag_import_timeout", autospec=True, return_value=1)
     def test_a_parse_past_the_import_timeout_is_killed(self, mock_timeout, tmp_path, connected):
@@ -561,7 +569,7 @@ class TestRun:
                 FakeCoordinator,
                 "parse_task_handler",
                 autospec=True,
-                side_effect=play_runtime(lambda request, comms: time.sleep(60)),
+                side_effect=play_runtime(lambda request, comms: _block_until_killed(comms)),
             )
             if connected
             else contextlib.nullcontext(),
@@ -590,7 +598,7 @@ class TestRun:
     ):
         def reply(request, comms):
             comms.socket.sendall((100).to_bytes(4, byteorder="big"))
-            time.sleep(60)
+            _block_until_killed(comms)
 
         mock_parse_task_handler.side_effect = play_runtime(reply)
 
@@ -600,12 +608,13 @@ class TestRun:
             "etl.artifact": f"The Lang-SDK runtime did not parse {tmp_path / 'etl.artifact'} within 1.0s"
         }
 
+    @pytest.mark.execution_timeout(30)
     @conf_vars({("dag_processor", "dag_file_processor_timeout"): "1"})
     @patch.object(
         FakeCoordinator,
         "_build_parse_task_handler_command",
         autospec=True,
-        side_effect=lambda self, *, path: time.sleep(60),
+        side_effect=lambda self, *, path: threading.Event().wait(),
     )
     def test_the_dag_file_processor_timeout_applies_until_the_import_timeout_is_reported(
         self, mock_build_command, tmp_path

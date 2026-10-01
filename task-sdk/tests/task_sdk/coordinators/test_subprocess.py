@@ -1147,7 +1147,7 @@ class TestParseTaskHandler:
                         os._exit(1)
                 os.write(write_fd, str(runtime_pid).encode())
                 os.close(write_fd)
-                time.sleep(60)
+                os.waitpid(runtime_pid, 0)
             finally:
                 os._exit(0)
 
@@ -1155,6 +1155,7 @@ class TestParseTaskHandler:
         with os.fdopen(read_fd) as reader:
             runtime = psutil.Process(int(reader.read()))
         try:
+            # Polls: the runtime is not a child to wait for, and time_machine cannot reach another process.
             deadline = time.monotonic() + 30
             while runtime.name() != "sleep":
                 assert time.monotonic() < deadline, "the runtime did not start"
