@@ -103,16 +103,18 @@ def play_runtime(
         coordinator, *, comm_address, logs_address, report_schema_version, **kwargs
     ) -> None:
         report_schema_version(schema_version)
-        comm = socket.create_connection(comm_address)
-        logs = socket.create_connection(logs_address)
-        for line in log_lines:
-            logs.sendall(json.dumps(line).encode() + b"\n")
-        comms = CommsDecoder[ToSDKTaskHandlerProcessor, ToManager](
-            socket=comm, body_decoder=TypeAdapter(ToSDKTaskHandlerProcessor)
-        )
-        request = comms._get_response()
-        assert isinstance(request, TaskHandlerParseRequest)
-        if (result := reply(request, comms)) is not None:
-            comms.send(result)
+        with (
+            socket.create_connection(comm_address) as comm,
+            socket.create_connection(logs_address) as logs,
+        ):
+            for line in log_lines:
+                logs.sendall(json.dumps(line).encode() + b"\n")
+            comms = CommsDecoder[ToSDKTaskHandlerProcessor, ToManager](
+                socket=comm, body_decoder=TypeAdapter(ToSDKTaskHandlerProcessor)
+            )
+            request = comms._get_response()
+            assert isinstance(request, TaskHandlerParseRequest)
+            if (result := reply(request, comms)) is not None:
+                comms.send(result)
 
     return parse_task_handler
