@@ -490,6 +490,31 @@ class TestEdgeWorker:
         assert error_file_path.exists()
         assert "supervisor crashed" in error_file_path.read_text()
 
+    @pytest.mark.asyncio
+    async def test_fetch_capability_is_not_overridden_by_sysinfo_hook(
+        self, worker_with_job_and_sysinfo: EdgeWorker, mocker
+    ):
+        mocker.patch.object(
+            worker_with_job_and_sysinfo,
+            "extended_sysinfo",
+            autospec=True,
+            return_value={"supports_task_instance_uuid": False},
+        )
+        fetch = mocker.patch(
+            "airflow.providers.edge3.cli.worker.jobs_fetch", autospec=True, return_value=None
+        )
+
+        assert (await worker_with_job_and_sysinfo._get_sysinfo())["supports_task_instance_uuid"] is False
+        await worker_with_job_and_sysinfo.fetch_and_run_job()
+
+        fetch.assert_awaited_once_with(
+            worker_with_job_and_sysinfo.hostname,
+            worker_with_job_and_sysinfo.queues,
+            worker_with_job_and_sysinfo.free_concurrency,
+            worker_with_job_and_sysinfo.team_name,
+            supports_task_instance_uuid=True,
+        )
+
     @patch("airflow.providers.edge3.cli.worker.jobs_fetch")
     @patch("airflow.providers.edge3.cli.worker.EdgeWorker._launch_job")
     @pytest.mark.asyncio
@@ -1068,6 +1093,7 @@ class TestEdgeWorker:
         assert sysinfo["status"] == logging.INFO
         assert "status_text" not in sysinfo  # is only defined if extended sysinfo provides this field
         assert sysinfo["concurrency"] == concurrency
+        assert "supports_task_instance_uuid" not in sysinfo
 
     @pytest.mark.asyncio
     async def test_get_sysinfo_version_mismatch(self, worker_with_job: EdgeWorker):

@@ -1,0 +1,10 @@
+Plan for Edge worker API downtime when upgrading:
+
+1. Stop the Airflow scheduler and the Edge worker API processes.
+2. Upgrade the Edge provider on the central installation and all workers.
+3. Start the updated scheduler, which applies Edge database migrations automatically.
+   Then start the updated Edge worker API and workers, in that order.
+
+Stop the scheduler and drain jobs before downgrading.
+
+The ``edge_worker.ti.finish`` metric now includes failed jobs as well as successful jobs.

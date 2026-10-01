@@ -17,16 +17,30 @@
 from __future__ import annotations
 
 import warnings
+from importlib import import_module
 from unittest import mock
 
 import pytest
 import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 
+from airflow import settings
+from airflow.providers.edge3.models.edge_job import EdgeJobModel
 from airflow.utils.db_manager import RunDBManager
 
 from tests_common.test_utils.config import conf_vars
 
 pytestmark = [pytest.mark.db_test]
+
+
+@pytest.fixture
+def legacy_edge_job_table():
+    migration = import_module("airflow.providers.edge3.migrations.versions.0001_3_0_0_create_edge_tables")
+    with settings.engine.begin() as connection:
+        EdgeJobModel.__table__.drop(connection)
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
 
 
 class TestEdgeDBManager:
@@ -220,7 +234,9 @@ class TestEdgeDBManager:
         assert "3.4.0" in _REVISION_HEADS_MAP
         assert _REVISION_HEADS_MAP["3.4.0"] == "a09c3ee8e1d3"
 
-    def test_initdb_stamps_and_upgrades_when_tables_exist_without_version(self, session):
+    def test_initdb_stamps_and_upgrades_when_tables_exist_without_version(
+        self, session, legacy_edge_job_table
+    ):
         """Test that initdb runs incremental migrations when tables exist but alembic version table does not."""
         from sqlalchemy import inspect, text
 
@@ -265,7 +281,9 @@ class TestEdgeDBManager:
         assert "concurrency" in columns
         assert "team_name" in columns
 
-    def test_upgradedb_stamps_and_upgrades_when_tables_exist_without_version(self, session):
+    def test_upgradedb_stamps_and_upgrades_when_tables_exist_without_version(
+        self, session, legacy_edge_job_table
+    ):
         """Test upgradedb runs incremental migrations when tables exist but alembic version table does not."""
         from sqlalchemy import inspect, text
 
@@ -310,7 +328,7 @@ class TestEdgeDBManager:
         assert "concurrency" in columns
         assert "team_name" in columns
 
-    def test_migration_adds_concurrency_column(self, session):
+    def test_migration_adds_concurrency_column(self, session, legacy_edge_job_table):
         """Test that upgrading from 3.0.0 actually adds the concurrency column."""
         from alembic import command
         from alembic.migration import MigrationContext

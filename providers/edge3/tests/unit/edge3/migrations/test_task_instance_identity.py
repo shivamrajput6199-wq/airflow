@@ -23,9 +23,13 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
+from alembic.environment import EnvironmentContext
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
+
+from airflow.migrations import db_types
 
 migration = import_module(
     "airflow.providers.edge3.migrations.versions.0006_5_0_0_add_task_instance_id_to_edge_job"
@@ -40,29 +44,36 @@ def reflected_columns(connection):
 
 
 @pytest.fixture
-def legacy_jobs():
+def legacy_jobs(monkeypatch):
+    for name in ("TIMESTAMP", "StringID"):
+        monkeypatch.delitem(vars(db_types), name, raising=False)
+    for name in ("TIMESTAMP", "StringID"):
+        monkeypatch.setitem(vars(db_types), name, getattr(db_types, name))
     engine = sa.create_engine("sqlite://")
     with engine.begin() as connection:
         metadata = sa.MetaData(naming_convention={"pk": "%(table_name)s_pkey"})
-        context = MigrationContext.configure(connection, opts={"target_metadata": metadata})
         scripts = ScriptDirectory(str(Path(migration.__file__).parents[1]))
-        with Operations.context(context):
-            for revision in reversed(list(scripts.walk_revisions(base="base", head=migration.down_revision))):
-                revision.module.upgrade()
-            jobs = sa.Table("edge_job", sa.MetaData(), autoload_with=connection)
-            row = dict(
-                dag_id="dag",
-                task_id="task",
-                run_id="run",
-                map_index=-1,
-                try_number=1,
-                state="queued",
-                queue="default",
-                concurrency_slots=1,
-                command='{"ti":{"id":"00000000-0000-0000-0000-000000000001"}}',
-            )
-            connection.execute(jobs.insert().values(**row))
-            yield connection, row
+        with EnvironmentContext(Config(), scripts) as environment:
+            environment.configure(connection=connection, target_metadata=metadata)
+            with Operations.context(environment.get_context()):
+                for revision in reversed(
+                    list(scripts.walk_revisions(base="base", head=migration.down_revision))
+                ):
+                    revision.module.upgrade()
+                jobs = sa.Table("edge_job", sa.MetaData(), autoload_with=connection)
+                row = dict(
+                    dag_id="dag",
+                    task_id="task",
+                    run_id="run",
+                    map_index=-1,
+                    try_number=1,
+                    state="queued",
+                    queue="default",
+                    concurrency_slots=1,
+                    command='{"ti":{"id":"00000000-0000-0000-0000-000000000001"}}',
+                )
+                connection.execute(jobs.insert().values(**row))
+                yield connection, row
     engine.dispose()
 
 

@@ -176,13 +176,18 @@ async def jobs_fetch(
     queues: list[str] | None,
     free_concurrency: int,
     team_name: str | None = None,
+    *,
+    supports_task_instance_uuid: bool = False,
 ) -> EdgeJobFetched | None:
     """Fetch a job to execute on the edge worker."""
     result = await _make_generic_request(
         "POST",
         f"jobs/fetch/{quote(hostname)}",
         WorkerQueuesBody(
-            queues=queues, free_concurrency=free_concurrency, team_name=team_name
+            queues=queues,
+            free_concurrency=free_concurrency,
+            team_name=team_name,
+            supports_task_instance_uuid=supports_task_instance_uuid,
         ).model_dump_json(exclude_unset=True),
     )
     if result:

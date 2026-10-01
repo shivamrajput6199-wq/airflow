@@ -20,12 +20,13 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
+from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, literal, select
 
 from airflow.executors import workloads
 from airflow.executors.base_executor import BaseExecutor
@@ -33,7 +34,7 @@ from airflow.models.taskinstance import TaskInstance
 from airflow.models.taskinstancekey import TaskInstanceKey
 from airflow.providers.common.compat.sdk import Stats, timezone
 from airflow.providers.edge3.models.db import EdgeDBManager, check_db_manager_config
-from airflow.providers.edge3.models.edge_job import EdgeJobModel
+from airflow.providers.edge3.models.edge_job import EdgeJobModel, build_job_key
 from airflow.providers.edge3.models.edge_logs import EdgeLogsModel
 from airflow.providers.edge3.models.edge_worker import EdgeWorkerModel, EdgeWorkerState, reset_metrics
 from airflow.providers.edge3.models.types import (
@@ -51,6 +52,9 @@ from airflow.utils.state import TaskInstanceState
 
 if AIRFLOW_V_3_4_PLUS:
     from airflow.executors.workloads.base import WorkloadType
+
+with suppress(ImportError):
+    from airflow.executors.workloads.types import TaskInstanceUuid
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -83,7 +87,9 @@ class EdgeExecutor(BaseExecutor):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.last_reported_state: dict[UUID | TaskInstanceKey | CallbackKey, TaskInstanceState | str] = {}
+        self.last_reported_state: dict[
+            TaskInstanceUuid | TaskInstanceKey | CallbackKey, TaskInstanceState | str
+        ] = {}
 
         # Check if self has the ExecutorConf set on the self.conf attribute with all required methods.
         # In Airflow 2.x, ExecutorConf exists but lacks methods like getint, getboolean, getsection, etc.
@@ -128,7 +134,7 @@ class EdgeExecutor(BaseExecutor):
         session: Session,
     ) -> None:
         """Put new workload to queue. Airflow 3 entry point to execute a task."""
-        key: UUID | TaskInstanceKey | CallbackKey
+        key: TaskInstanceUuid | TaskInstanceKey | CallbackKey
         if is_callback_execute(workload):
             existing_job = session.scalars(
                 select(EdgeJobModel).where(
@@ -164,7 +170,7 @@ class EdgeExecutor(BaseExecutor):
             task_instance_id = str(task_instance.id) if self.supports_task_instance_uuid else ""
 
             # Check if job already exists with same dag_id, task_id, run_id, map_index, try_number
-            existing_job = session.scalars(
+            matching_jobs = session.scalars(
                 select(EdgeJobModel).where(
                     EdgeJobModel.dag_id == coordinates.dag_id,
                     EdgeJobModel.task_id == coordinates.task_id,
@@ -174,7 +180,7 @@ class EdgeExecutor(BaseExecutor):
                     EdgeJobModel.task_instance_id.in_((task_instance_id, "")),
                 )
             )
-            existing_job = next((job for job in existing_job if self._job_key(job) == key), None)
+            existing_job = next((job for job in matching_jobs if self._job_key(job) == key), None)
 
             if existing_job:
                 existing_job.state = TaskInstanceState.QUEUED
@@ -270,8 +276,11 @@ class EdgeExecutor(BaseExecutor):
 
         for job in lifeless_jobs:
             key = self._job_key(job)
-            if isinstance(key, UUID):
-                ti = session.scalar(select(TaskInstance).where(TaskInstance.id == key))
+            if self.supports_task_instance_uuid and isinstance(key, TaskInstanceUuid):
+                ti = session.scalar(select(TaskInstance).where(TaskInstance.id == key.id))
+                if ti is None:
+                    self.running.discard(key)
+                    self.last_reported_state.pop(key, None)
             else:
                 ti = TaskInstance.get_task_instance(
                     dag_id=job.dag_id,
@@ -296,25 +305,44 @@ class EdgeExecutor(BaseExecutor):
 
         return bool(lifeless_jobs)
 
-    def _job_key(self, job: EdgeJobModel) -> UUID | TaskInstanceKey | CallbackKey:
+    def _job_key(self, job: EdgeJobModel) -> TaskInstanceUuid | TaskInstanceKey | CallbackKey:
         key = job.key
         if self.supports_task_instance_uuid and isinstance(key, TaskInstanceKey):
-            return UUID(job.task_instance_id or json.loads(job.command)["ti"]["id"])
+            return TaskInstanceUuid(UUID(job.task_instance_id or json.loads(job.command)["ti"]["id"]))
         return key
 
     def _get_tracked_job_keys(
         self, session: Session, states: Sequence[TaskInstanceState]
-    ) -> set[UUID | TaskInstanceKey | CallbackKey]:
+    ) -> set[TaskInstanceUuid | TaskInstanceKey | CallbackKey]:
         """
         Read the keys of this team's jobs that are in one of ``states``.
 
         Rows are read without locking on purpose: an edge worker fetches its next job with
         ``FOR UPDATE SKIP LOCKED``, so locking the queued rows here would make it come back empty.
         """
-        query = select(EdgeJobModel).where(
-            EdgeJobModel.team_name == self.team_name, EdgeJobModel.state.in_(states)
+        command = (
+            case((EdgeJobModel.task_instance_id == "", EdgeJobModel.command), else_=None)
+            if self.supports_task_instance_uuid
+            else literal(None)
         )
-        return {self._job_key(job) for job in session.scalars(query)}
+        query = select(
+            EdgeJobModel.dag_id,
+            EdgeJobModel.task_id,
+            EdgeJobModel.run_id,
+            EdgeJobModel.try_number,
+            EdgeJobModel.map_index,
+            EdgeJobModel.task_instance_id,
+            command.label("command"),
+        ).where(EdgeJobModel.team_name == self.team_name, EdgeJobModel.state.in_(states))
+        keys: set[TaskInstanceUuid | TaskInstanceKey | CallbackKey] = set()
+        for job in session.execute(query):
+            key: TaskInstanceUuid | TaskInstanceKey | CallbackKey = build_job_key(
+                job.dag_id, job.task_id, job.run_id, job.try_number, job.map_index
+            )
+            if self.supports_task_instance_uuid and isinstance(key, TaskInstanceKey):
+                key = TaskInstanceUuid(UUID(job.task_instance_id or json.loads(job.command)["ti"]["id"]))
+            keys.add(key)
+        return keys
 
     def _purge_jobs(self, session: Session) -> bool:
         """Clean finished jobs."""
@@ -372,28 +400,35 @@ class EdgeExecutor(BaseExecutor):
                 if key in self.last_reported_state:
                     del self.last_reported_state[key]
                 purged_marker = True
-                session.delete(job)
-                session.execute(
-                    delete(EdgeLogsModel).where(
-                        EdgeLogsModel.dag_id == job.dag_id,
-                        EdgeLogsModel.run_id == job.run_id,
-                        EdgeLogsModel.task_id == job.task_id,
-                        EdgeLogsModel.map_index == job.map_index,
-                        EdgeLogsModel.try_number == job.try_number,
-                        ~select(EdgeJobModel.dag_id)
-                        .where(
-                            EdgeJobModel.dag_id == job.dag_id,
-                            EdgeJobModel.run_id == job.run_id,
-                            EdgeJobModel.task_id == job.task_id,
-                            EdgeJobModel.map_index == job.map_index,
-                            EdgeJobModel.try_number == job.try_number,
-                            EdgeJobModel.task_instance_id != job.task_instance_id,
-                        )
-                        .exists(),
-                    )
-                )
+                self._delete_job(job, session)
 
         return purged_marker
+
+    @staticmethod
+    def _delete_job(job: EdgeJobModel, session: Session) -> None:
+        session.delete(job)
+        session.flush()
+        session.execute(
+            delete(EdgeLogsModel)
+            .where(
+                EdgeLogsModel.dag_id == job.dag_id,
+                EdgeLogsModel.run_id == job.run_id,
+                EdgeLogsModel.task_id == job.task_id,
+                EdgeLogsModel.map_index == job.map_index,
+                EdgeLogsModel.try_number == job.try_number,
+                ~select(EdgeJobModel.dag_id)
+                .where(
+                    EdgeJobModel.dag_id == job.dag_id,
+                    EdgeJobModel.run_id == job.run_id,
+                    EdgeJobModel.task_id == job.task_id,
+                    EdgeJobModel.map_index == job.map_index,
+                    EdgeJobModel.try_number == job.try_number,
+                    EdgeJobModel.task_instance_id != job.task_instance_id,
+                )
+                .exists(),
+            )
+            .execution_options(synchronize_session=False)
+        )
 
     @provide_session
     def sync(self, *, session: Session = NEW_SESSION) -> None:
@@ -445,7 +480,7 @@ class EdgeExecutor(BaseExecutor):
         )
         for job in jobs:
             if self._job_key(job) == key:
-                session.delete(job)
+                self._delete_job(job, session)
         self.log.info("Revoked task instance %s from EdgeExecutor", key)
 
     @provide_session

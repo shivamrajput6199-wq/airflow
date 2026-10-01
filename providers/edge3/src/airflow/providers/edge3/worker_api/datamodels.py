@@ -123,6 +123,9 @@ class WorkerQueuesBody(WorkerQueuesBase):
     """Queues that a worker supports to run jobs on."""
 
     free_concurrency: Annotated[int, Field(description="Number of free concurrency slots on the worker.")]
+    supports_task_instance_uuid: bool = Field(
+        default=False, description="Whether the worker reports task-instance UUIDs when updating jobs."
+    )
 
 
 class WorkerStateBody(WorkerQueuesBase):

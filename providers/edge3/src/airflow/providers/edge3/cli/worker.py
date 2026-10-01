@@ -389,7 +389,6 @@ class EdgeWorker:
             ),
             "airflow_version": airflow_version,
             "edge_provider_version": edge_provider_version,
-            "supports_task_instance_uuid": True,
             "python_version": sys.version,
             "worker_start_time": self.worker_start_time,
             "concurrency": self.concurrency,
@@ -673,7 +672,13 @@ class EdgeWorker:
     async def fetch_and_run_job(self) -> None:
         """Fetch, start and monitor a new job."""
         logger.debug("Attempting to fetch a new job...")
-        edge_job = await jobs_fetch(self.hostname, self.queues, self.free_concurrency, self.team_name)
+        edge_job = await jobs_fetch(
+            self.hostname,
+            self.queues,
+            self.free_concurrency,
+            self.team_name,
+            supports_task_instance_uuid=True,
+        )
         if not edge_job:
             logger.debug(
                 "No new job to process%s",

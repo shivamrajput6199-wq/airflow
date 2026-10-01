@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -42,6 +43,8 @@ from airflow.utils.state import TaskInstanceState
 
 if TYPE_CHECKING:
     from airflow.providers.edge3.models.types import ExecuteTypeBody
+
+log = logging.getLogger(__name__)
 
 jobs_router = AirflowRouter(tags=["Jobs"], prefix="/jobs")
 
@@ -102,7 +105,8 @@ def fetch(
     job: EdgeJobModel | None = session.scalar(query)
     if not job:
         return None
-    if job.task_instance_id and not (worker.sysinfo or {}).get("supports_task_instance_uuid"):
+    if job.task_instance_id and not body.supports_task_instance_uuid:
+        log.warning("Edge worker %s cannot fetch UUID-keyed jobs; upgrade the worker.", worker_name)
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Upgrade this Edge worker to report task-instance UUIDs."
         )
@@ -161,6 +165,28 @@ def state(
         .with_for_update()
     )
     if job is None:
+        sibling_identity = session.scalar(
+            select(EdgeJobModel.task_instance_id)
+            .where(
+                EdgeJobModel.dag_id == dag_id,
+                EdgeJobModel.task_id == task_id,
+                EdgeJobModel.run_id == run_id,
+                EdgeJobModel.map_index == map_index,
+                EdgeJobModel.try_number == try_number,
+            )
+            .limit(1)
+        )
+        if sibling_identity is not None:
+            log.warning(
+                "Ignoring Edge state report for %s.%s run %s try %s map %s: "
+                "task-instance UUID %s does not match a stored job.",
+                dag_id,
+                task_id,
+                run_id,
+                try_number,
+                map_index,
+                task_instance_id,
+            )
         return
     if job.state == TaskInstanceState.RUNNING and state in (
         TaskInstanceState.SUCCESS,

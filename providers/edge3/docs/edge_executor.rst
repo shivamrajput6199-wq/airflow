@@ -244,27 +244,3 @@ pipeline. The table below documents known compatibility issues and workarounds:
 
 **For Airflow 3.2 users:** If upgrading to Edge provider >= 3.6.0 breaks metrics export, either
 (1) upgrade Airflow to 3.3+, or (2) downgrade to Edge provider <= 3.5.0 with the workaround above.
-
-Task-instance UUIDs and upgrades
--------------------------------
-
-On cores that support UUID executor keys, Edge tracks each task attempt by its UUID.
-Jobs with the same Dag, task, run, map index and try number can coexist without
-sharing completion events. Older supported cores continue to use coordinate keys.
-
-This requires the Edge job identity migration and updated Edge workers. Upgrade in
-this order:
-
-1. Stop Edge scheduling and stop the old Edge worker API processes. Old API processes
-   must not serve requests after UUID-keyed jobs are created.
-2. Upgrade the Edge provider and run its database migration through ``airflow db migrate``.
-3. Start the updated API servers and upgrade the Edge workers before resuming scheduling.
-
-Jobs queued before the upgrade retain their legacy identity, so an older worker can
-finish an already fetched job without completing a newer attempt at the same coordinates.
-New UUID-keyed jobs require a worker advertising UUID support; fetching one with an older
-worker returns HTTP 409 before the job is claimed. New workers also work with older cores.
-
-Stop scheduling and drain jobs before downgrading. The schema downgrade refuses to remove
-UUID identity while multiple jobs share the old coordinate key. Log storage still uses
-coordinate-based paths; this change isolates executor lifecycle events, not log namespaces.

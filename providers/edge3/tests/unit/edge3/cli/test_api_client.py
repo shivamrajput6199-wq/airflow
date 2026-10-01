@@ -27,7 +27,12 @@ from aiohttp import ClientResponseError, ConnectionTimeoutError
 from fastapi import Request
 
 from airflow.providers.common.compat.sdk import TaskInstanceKey
-from airflow.providers.edge3.cli.api_client import _make_generic_request, jobs_set_state, jwt_generator
+from airflow.providers.edge3.cli.api_client import (
+    _make_generic_request,
+    jobs_fetch,
+    jobs_set_state,
+    jwt_generator,
+)
 from airflow.providers.edge3.worker_api import auth
 from airflow.utils.state import TaskInstanceState
 
@@ -82,6 +87,25 @@ def _build_request_side_effect(
         )
 
     return _request
+
+
+@pytest.mark.parametrize("uuid_capability", [None, False, True])
+async def test_jobs_fetch_sends_worker_capability(mocker, uuid_capability):
+    request = mocker.patch(
+        "airflow.providers.edge3.cli.api_client._make_generic_request", autospec=True, return_value=None
+    )
+    kwargs = {} if uuid_capability is None else {"supports_task_instance_uuid": uuid_capability}
+
+    assert await jobs_fetch("worker", ["queue"], 2, **kwargs) is None
+
+    request.assert_awaited_once()
+    assert request.call_args.args[:2] == ("POST", "jobs/fetch/worker")
+    assert json.loads(request.call_args.args[2]) == {
+        "queues": ["queue"],
+        "free_concurrency": 2,
+        "team_name": None,
+        "supports_task_instance_uuid": bool(uuid_capability),
+    }
 
 
 class TestApiClient:
